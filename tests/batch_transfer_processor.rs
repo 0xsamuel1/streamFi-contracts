@@ -35,7 +35,11 @@ fn deploy_processor(env: &Env) -> BatchTransferProcessorClient<'_> {
 /// own default of "unlocked".
 fn lock_state(env: &Env, client: &BatchTransferProcessorClient<'_>) -> bool {
     env.as_contract(&client.address, || {
-        env.storage().instance().get(&LOCK_KEY).unwrap_or(false)
+        env.storage()
+            .instance()
+            .get::<_, u32>(&LOCK_KEY)
+            .unwrap_or(0)
+            > 0
     })
 }
 
@@ -116,7 +120,7 @@ fn process_batch_rejects_when_lock_is_held() {
     // (e.g. a host panic). The contract must reject the next call
     // gracefully and not corrupt the externally-imposed lock state.
     env.as_contract(&client.address, || {
-        env.storage().instance().set(&LOCK_KEY, &true);
+        env.storage().instance().set(&LOCK_KEY, &1_u32);
     });
 
     let amounts = Vec::from_array(&env, [42u64]);

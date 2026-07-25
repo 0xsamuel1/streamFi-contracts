@@ -4,7 +4,7 @@ use soroban_sdk::{
     testutils::{Address as _, Ledger},
     Address, Env,
 };
-use conduit_integration_tests::oracle::{TwapOracleIntegrationClient, OracleConfig, Error};
+use conduit_integration_tests::oracle::{TwapOracleIntegrationClient, OracleConfig};
 
 #[test]
 fn test_oracle_concurrency_locking() {

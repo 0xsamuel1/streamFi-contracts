@@ -81,45 +81,41 @@ impl TwapOracle {
     }
 
     pub fn get_twap_price(env: Env) -> Result<u64, Error> {
-        let lock_key = soroban_sdk::symbol_short!("O_Lock");
-        let is_locked: bool = env.storage().instance().get(&lock_key).unwrap_or(false);
-        if is_locked {
-            return Err(Error::OracleLocked);
-        }
+        with_guard(&env, || {
+            let config: OracleConfig = env
+                .storage()
+                .instance()
+                .get(&DataKey::Config)
+                .ok_or(Error::OracleNotConfigured)?;
 
-        env.storage().instance().set(&lock_key, &true);
+            let data: PriceData = env
+                .storage()
+                .instance()
+                .get(&DataKey::Price)
+                .ok_or(Error::NoPriceAvailable)?;
 
-        let config: OracleConfig = match env.storage().instance().get(&DataKey::Config) {
-            Some(cfg) => cfg,
-            None => {
-                env.storage().instance().set(&lock_key, &false);
-                return Err(Error::OracleNotConfigured);
+            let age = env.ledger().timestamp().saturating_sub(data.updated_at);
+            if age > config.max_staleness {
+                return Err(Error::OracleStalePrice);
             }
-        };
 
-        let data: PriceData = match env.storage().instance().get(&DataKey::Price) {
-            Some(d) => d,
-            None => {
-                env.storage().instance().set(&lock_key, &false);
-                return Err(Error::NoPriceAvailable);
+            if data.price == 0 {
+                return Err(Error::InvalidPrice);
             }
-        };
 
-        let age = env.ledger().timestamp().saturating_sub(data.updated_at);
-        if age > config.max_staleness {
-            env.storage().instance().set(&lock_key, &false);
-            return Err(Error::OracleStalePrice);
-        }
-
-        if data.price == 0 {
-            env.storage().instance().set(&lock_key, &false);
-            return Err(Error::InvalidPrice);
-        }
-
-        env.storage().instance().set(&lock_key, &false);
-        Ok(data.price)
+            Ok(data.price)
+        })
     }
 
+    /// Converts a nominal token amount into its fiat equivalent.
+    ///
+    /// **Nested-lock warning:** This method calls `get_twap_price`
+    /// internally, which acquires and releases its own re-entrancy guard.
+    /// If this method is ever wrapped in an outer guard (e.g., via a
+    /// `with_guard` call), the depth counter will already be at 1 and the
+    /// nested `get_twap_price` call will deadlock with `OracleLocked`.
+    /// Do NOT add a guard to this function without first refactoring
+    /// `get_twap_price` to accept an optional pre-acquired lock.
     pub fn calculate_fiat_stream_payout(env: Env, token_amount: u64) -> Result<u64, Error> {
         let current_price = Self::get_twap_price(env.clone())?;
 
@@ -136,7 +132,8 @@ impl TwapOracle {
         let value = (token_amount as u128)
             .checked_mul(current_price as u128)
             .ok_or(Error::ArithmeticOverflow)?
-            / precision;
+            .checked_div(precision)
+            .ok_or(Error::ArithmeticOverflow)?;
 
         if value > u64::MAX as u128 {
             return Err(Error::ArithmeticOverflow);
@@ -157,6 +154,27 @@ fn require_admin(env: &Env, caller: &Address) -> Result<(), Error> {
     }
     caller.require_auth();
     Ok(())
+}
+
+/// Execute `f` under the re-entrancy guard, releasing the lock afterwards.
+///
+/// Uses a depth counter stored at the `O_Lock` symbol key instead of a
+/// boolean flag. See `drip_stream::state::with_guard` for the rationale.
+const MAX_REENTRANCY_DEPTH: u32 = 1;
+
+fn with_guard<R>(env: &Env, f: impl FnOnce() -> Result<R, Error>) -> Result<R, Error> {
+    let lock_key = soroban_sdk::symbol_short!("O_Lock");
+    let depth: u32 = env.storage().instance().get(&lock_key).unwrap_or(0);
+    if depth >= MAX_REENTRANCY_DEPTH {
+        return Err(Error::OracleLocked);
+    }
+    env.storage().instance().set(&lock_key, &(depth + 1));
+    let result = f();
+    let d: u32 = env.storage().instance().get(&lock_key).unwrap_or(1);
+    if d > 0 {
+        env.storage().instance().set(&lock_key, &(d - 1));
+    }
+    result
 }
 
 #[cfg(test)]

@@ -1,8 +1,12 @@
 use soroban_sdk::{contracttype, Address};
 
-/// A single stream creation request inside a batch.
+/// A single request within a `create_batch_streams` call.
+///
+/// Each field mirrors the corresponding parameter of
+/// [`DripFactory::create_stream`]; see that function's documentation
+/// for descriptions of each field.
 #[contracttype]
-#[derive(Clone)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BatchStreamRequest {
     pub recipient: Address,
     pub token: Address,
