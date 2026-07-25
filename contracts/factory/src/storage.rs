@@ -75,25 +75,4 @@ pub enum DataKey {
     /// Value: `u64` — the last stream ID whose persistent `StreamAddr` TTL
     /// was bumped by the walker. Missing entry is treated as `0`.
     LastBumpedId,
-
-    /// **Instance storage.** Per-sender nonce for signature-based stream creation.
-    /// Key: `DataKey::SignatureNonce(Address)` — the sender's address
-    /// Value: `u64` — next valid nonce (starts at 0, incremented after each use)
-    SignatureNonce(Address),
-}
-
-/// A single stream configuration within a `create_batch_streams` call.
-///
-/// Mirrors the per-stream parameters of `create_stream` minus `sender`
-/// (the whole batch shares one sender/authorizer) -- see
-/// `DripFactory::create_batch_streams`.
-#[contracttype]
-#[derive(Clone)]
-pub struct BatchStreamRequest {
-    pub recipient: Address,
-    pub token: Address,
-    pub deposit: i128,
-    pub rate_per_sec: i128,
-    pub start_time: u64,
-    pub end_time: u64,
 }

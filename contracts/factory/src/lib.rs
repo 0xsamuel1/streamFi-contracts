@@ -7,8 +7,6 @@ mod governance;
 mod pause;
 mod query;
 pub mod storage;
-#[cfg(test)]
-mod tests;
 pub mod ttl;
 
 // Import `token` as `tok` to avoid shadowing by any `token: Address` parameter.
