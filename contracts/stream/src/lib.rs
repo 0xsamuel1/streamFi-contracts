@@ -107,10 +107,7 @@ impl DripStream {
 
     /// Recipient withdraws `amount` tokens.
     pub fn withdraw(env: Env, amount: i128) -> Result<i128, Error> {
-        state::lock(&env)?;
-        let res = Self::_withdraw(&env, amount);
-        state::unlock(&env);
-        res
+        state::with_guard(&env, |env| Self::_withdraw(env, amount))
     }
 
     fn _withdraw(env: &Env, amount: i128) -> Result<i128, Error> {
@@ -159,10 +156,7 @@ impl DripStream {
     /// the recipient's share MUST be transferred here rather than left for
     /// a later `withdraw()` call.
     pub fn cancel(env: Env) -> Result<(), Error> {
-        state::lock(&env)?;
-        let res = Self::_cancel(&env);
-        state::unlock(&env);
-        res
+        state::with_guard(&env, Self::_cancel)
     }
 
     fn _cancel(env: &Env) -> Result<(), Error> {
@@ -204,10 +198,7 @@ impl DripStream {
 
     /// Sender pauses the stream.
     pub fn pause(env: Env) -> Result<(), Error> {
-        state::lock(&env)?;
-        let res = Self::_pause(&env);
-        state::unlock(&env);
-        res
+        state::with_guard(&env, Self::_pause)
     }
 
     fn _pause(env: &Env) -> Result<(), Error> {
@@ -238,10 +229,7 @@ impl DripStream {
 
     /// Sender resumes a paused stream.
     pub fn resume(env: Env) -> Result<(), Error> {
-        state::lock(&env)?;
-        let res = Self::_resume(&env);
-        state::unlock(&env);
-        res
+        state::with_guard(&env, Self::_resume)
     }
 
     fn _resume(env: &Env) -> Result<(), Error> {
@@ -285,10 +273,7 @@ impl DripStream {
     /// as possible instead of paying for storage-extension instructions
     /// it never needed.
     pub fn top_up(env: Env, amount: i128) -> Result<(), Error> {
-        state::lock(&env)?;
-        let res = Self::_top_up(&env, amount);
-        state::unlock(&env);
-        res
+        state::with_guard(&env, |env| Self::_top_up(env, amount))
     }
 
     fn _top_up(env: &Env, amount: i128) -> Result<(), Error> {
@@ -317,10 +302,7 @@ impl DripStream {
     /// Transfers the exact required deposit (rate_per_second × extra_time_seconds)
     /// from the sender into the contract and updates `end_time`.
     pub fn extend_duration(env: Env, extra_time_seconds: u64) -> Result<(), Error> {
-        state::lock(&env)?;
-        let res = Self::_extend_duration(&env, extra_time_seconds);
-        state::unlock(&env);
-        res
+        state::with_guard(&env, |env| Self::_extend_duration(env, extra_time_seconds))
     }
 
     fn _extend_duration(env: &Env, extra_time_seconds: u64) -> Result<(), Error> {
@@ -370,10 +352,7 @@ impl DripStream {
 
     /// Sender reclaims unstreamed tokens (only if clawback was enabled).
     pub fn clawback(env: Env) -> Result<i128, Error> {
-        state::lock(&env)?;
-        let res = Self::_clawback(&env);
-        state::unlock(&env);
-        res
+        state::with_guard(&env, Self::_clawback)
     }
 
     fn _clawback(env: &Env) -> Result<i128, Error> {
@@ -419,10 +398,7 @@ impl DripStream {
     /// Settles atomically like `cancel()`: earned tokens go to recipient,
     /// unstreamed refund goes to sender.
     pub fn force_cancel(env: Env) -> Result<(), Error> {
-        state::lock(&env)?;
-        let res = Self::_force_cancel(&env);
-        state::unlock(&env);
-        res
+        state::with_guard(&env, Self::_force_cancel)
     }
 
     fn _force_cancel(env: &Env) -> Result<(), Error> {
@@ -473,10 +449,7 @@ impl DripStream {
     /// to the new recipient. The sender is intentionally not notified
     /// on-chain (use events); governance can add a sender-veto in future.
     pub fn transfer_recipient(env: Env, new_recipient: Address) -> Result<(), Error> {
-        state::lock(&env)?;
-        let res = Self::_transfer_recipient(&env, new_recipient);
-        state::unlock(&env);
-        res
+        state::with_guard(&env, |env| Self::_transfer_recipient(env, new_recipient))
     }
 
     fn _transfer_recipient(env: &Env, new_recipient: Address) -> Result<(), Error> {
