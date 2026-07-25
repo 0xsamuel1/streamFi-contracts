@@ -2,7 +2,7 @@
 
 use drip_governor::{DripGovernor, DripGovernorClient, Error};
 use soroban_sdk::{
-    testutils::{storage::Instance as _, Address as _},
+    testutils::{storage::Instance as _, Address as _, Events},
     Address, Env,
 };
 

@@ -41,3 +41,5 @@ lto = true
 [profile.release-with-logs]
 inherits = "release"
 debug-assertions = true
+[dependencies]
+soroban-sdk = { workspace = true }
