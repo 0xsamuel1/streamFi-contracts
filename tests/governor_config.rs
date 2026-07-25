@@ -10,7 +10,7 @@ fn deploy_governor(env: &Env) -> (DripGovernorClient<'_>, Address, Address) {
     let authority = Address::generate(env);
     let fee_recipient = Address::generate(env);
     let factory_address = Address::generate(env);
-
+   
     let id = env.register_contract(None, DripGovernor);
     let client = DripGovernorClient::new(env, &id);
 
