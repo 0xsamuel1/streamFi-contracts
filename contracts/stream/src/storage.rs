@@ -13,6 +13,11 @@ pub const FLAG_CLAWBACK_ENABLED: u32 = 1 << 1;
 #[doc(hidden)]
 pub const FLAG_CANCELLED: u32 = 1 << 2;
 
+/// Current storage layout version for this contract.
+/// Bump this and add an explicit migration check whenever a future
+/// upgrade changes the shape of persisted `StreamInfo`/`Config` data.
+pub const CURRENT_STORAGE_VERSION: u32 = 1;
+
 #[contracttype]
 pub enum DataKey {
     Sender,
@@ -37,6 +42,10 @@ pub enum DataKey {
     EventSequence,
     /// Lock for re-entrancy protection and concurrency control.
     Guard,
+    /// Storage layout version, written once at `initialize()`.
+    /// Future contract upgrades must check this before assuming the
+    /// persisted `StreamInfo`/`Config` layout is compatible.
+    StorageVersion,
 }
 
 #[contracttype]
