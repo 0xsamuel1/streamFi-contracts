@@ -14,7 +14,7 @@ use soroban_sdk::{symbol_short, Address, Env};
 /// Publication and the `set_paused` storage write are part of the same Soroban
 /// transaction, so either both commit or both roll back — an event is never
 /// emitted for a transition that did not actually persist.
-
+///
 /// Emitted when the factory transitions from unpaused to paused.
 ///
 /// Topics: `("paused", governor)` — the governor that authorized the halt.

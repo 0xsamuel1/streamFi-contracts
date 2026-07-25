@@ -126,51 +126,30 @@ impl TwapOracleIntegration {
     /// Returns the latest price, rejecting observations older than
     /// `max_staleness` seconds.
     pub fn get_twap_price(env: Env) -> Result<u64, Error> {
-        let lock_key = DataKey::Lock;
-        let is_locked: bool = env.storage().instance().get(&lock_key).unwrap_or(false);
-        if is_locked {
-            return Err(Error::OracleLocked);
-        }
+        with_guard(&env, || {
+            let config: OracleConfig = env
+                .storage()
+                .instance()
+                .get(&DataKey::Config)
+                .ok_or(Error::OracleNotConfigured)?;
 
-        env.storage().instance().set(&lock_key, &true);
+            let data: PriceData = env
+                .storage()
+                .instance()
+                .get(&DataKey::Price)
+                .ok_or(Error::NoPriceAvailable)?;
 
-        let config: OracleConfig = match env
-            .storage()
-            .instance()
-            .get(&DataKey::Config)
-        {
-            Some(cfg) => cfg,
-            None => {
-                env.storage().instance().set(&lock_key, &false);
-                return Err(Error::OracleNotConfigured);
+            let age = env.ledger().timestamp().saturating_sub(data.updated_at);
+            if age > config.max_staleness {
+                return Err(Error::OracleStalePrice);
             }
-        };
 
-        let data: PriceData = match env
-            .storage()
-            .instance()
-            .get(&DataKey::Price)
-        {
-            Some(d) => d,
-            None => {
-                env.storage().instance().set(&lock_key, &false);
-                return Err(Error::NoPriceAvailable);
+            if data.price == 0 {
+                return Err(Error::InvalidPrice);
             }
-        };
 
-        let age = env.ledger().timestamp().saturating_sub(data.updated_at);
-        if age > config.max_staleness {
-            env.storage().instance().set(&lock_key, &false);
-            return Err(Error::OracleStalePrice);
-        }
-
-        if data.price == 0 {
-            env.storage().instance().set(&lock_key, &false);
-            return Err(Error::InvalidPrice);
-        }
-
-        env.storage().instance().set(&lock_key, &false);
-        Ok(data.price)
+            Ok(data.price)
+        })
     }
 
     /// Converts a nominal token amount into its fiat equivalent.
@@ -218,6 +197,27 @@ fn require_admin(env: &Env, caller: &Address) -> Result<(), Error> {
     }
     caller.require_auth();
     Ok(())
+}
+
+/// Execute `f` under the re-entrancy guard, releasing the lock afterwards.
+///
+/// Uses a depth counter stored at `DataKey::Lock` instead of a boolean
+/// flag. See `drip_stream::state::with_guard` for the rationale.
+const MAX_REENTRANCY_DEPTH: u32 = 1;
+
+fn with_guard<R>(env: &Env, f: impl FnOnce() -> Result<R, Error>) -> Result<R, Error> {
+    let lock_key = DataKey::Lock;
+    let depth: u32 = env.storage().instance().get(&lock_key).unwrap_or(0);
+    if depth >= MAX_REENTRANCY_DEPTH {
+        return Err(Error::OracleLocked);
+    }
+    env.storage().instance().set(&lock_key, &(depth + 1));
+    let result = f();
+    let d: u32 = env.storage().instance().get(&lock_key).unwrap_or(1);
+    if d > 0 {
+        env.storage().instance().set(&lock_key, &(d - 1));
+    }
+    result
 }
 
 // REMAINING WORK (not done here — out of the /contracts scope this pass):
