@@ -100,6 +100,12 @@ impl Setup {
 // ── Withdraw ─────────────────────────────────────────────────────────────────
 
 #[test]
+fn storage_version_set_on_initialize() {
+    let s = Setup::new(100, 3600, false);
+    assert_eq!(s.client.storage_version(), 1);
+}
+
+#[test]
 fn withdraw_zero_at_start() {
     let s = Setup::new(100, 3600, false);
     // At exactly start_time, elapsed = 0

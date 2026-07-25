@@ -85,6 +85,7 @@ impl DripStream {
         s.set(&DataKey::PausedAt, &0_u64);
         s.set(&DataKey::Flags, &flags);
         s.set(&DataKey::EventSequence, &0_u64);
+        s.set(&DataKey::StorageVersion, &storage::CURRENT_STORAGE_VERSION);
         // Write the entire stream state as a single struct — one storage
         // write instead of eleven. All subsequent reads go through
         // state::load(), which fetches the whole struct in one call.
@@ -491,6 +492,19 @@ impl DripStream {
         env.storage()
             .instance()
             .get(&DataKey::EventSequence)
+            .unwrap_or(0)
+    }
+
+    /// Storage layout version this instance was initialized with.
+    ///
+    /// Upgrade tooling should read this before invoking a new WASM hash
+    /// via `contract upgrade` and confirm it matches the version the new
+    /// code expects — pre-existing streams initialized under an older
+    /// layout are not automatically migrated.
+    pub fn storage_version(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::StorageVersion)
             .unwrap_or(0)
     }
 }
