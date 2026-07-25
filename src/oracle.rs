@@ -129,30 +129,34 @@ impl TwapOracleIntegration {
         let lock_key = DataKey::Lock;
         let is_locked: bool = env.storage().instance().get(&lock_key).unwrap_or(false);
         if is_locked {
-            // Resolve gracefully when concurrent asynchronous hooks fire
             return Err(Error::OracleLocked);
         }
 
-        // Set lock
         env.storage().instance().set(&lock_key, &true);
 
-        let config: OracleConfig = env
+        let config: OracleConfig = match env
             .storage()
             .instance()
             .get(&DataKey::Config)
-            .ok_or_else(|| {
+        {
+            Some(cfg) => cfg,
+            None => {
                 env.storage().instance().set(&lock_key, &false);
-                Error::OracleNotConfigured
-            })?;
+                return Err(Error::OracleNotConfigured);
+            }
+        };
 
-        let data: PriceData = env
+        let data: PriceData = match env
             .storage()
             .instance()
             .get(&DataKey::Price)
-            .ok_or_else(|| {
+        {
+            Some(d) => d,
+            None => {
                 env.storage().instance().set(&lock_key, &false);
-                Error::NoPriceAvailable
-            })?;
+                return Err(Error::NoPriceAvailable);
+            }
+        };
 
         let age = env.ledger().timestamp().saturating_sub(data.updated_at);
         if age > config.max_staleness {
@@ -165,7 +169,6 @@ impl TwapOracleIntegration {
             return Err(Error::InvalidPrice);
         }
 
-        // Release lock
         env.storage().instance().set(&lock_key, &false);
         Ok(data.price)
     }

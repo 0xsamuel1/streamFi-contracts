@@ -1,47 +1,52 @@
-//! DripOracle — a TWAP price-aggregator contract for fiat-denominated
-//! streams.
-//!
-//! Replaces the abandoned `src/oracle.rs` of the integration-test
-//! crate. Real on-chain TWAP over a bounded per-asset ring buffer of
-//! observations, fed by a per-asset whitelisted set of oracle_addresses,
-//! administered by a single admin.
-//!
-//! Public surface (see `#[contractimpl]` below):
-//!   * `init(admin)` — one-time setup.
-//!   * `configure_asset(asset, decimals, window_size, max_staleness)` — admin-only.
-//!   * `add_oracle(asset, oracle)` / `remove_oracle(asset, oracle)` — admin-only.
-//!   * `submit_observation(asset, price, timestamp, oracle)` — oracle-address-signed.
-//!   * `get_twap(asset) -> (price, decimals)` — read-only.
-//!
-//! Read-only convenience accessors (`oracle_count(asset)`,
-//! `observation_count(asset)`, `is_whitelisted(asset, oracle)`,
-//! `admin_address()`) round out the surface so off-chain tooling can
-//! inspect without invoking the more expensive set of methods.
-
 #![no_std]
 
-mod admin;
-mod errors;
-mod storage;
-#[cfg(test)]
-mod tests;
-mod twap;
+use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, Env};
 
-pub use errors::Error;
-use storage::{AssetConfig, DataKey, Observation};
-use twap::{bump_persistent, BUFFER_MAX, MAX_DECIMALS};
+#[contracttype]
+pub enum DataKey {
+    Admin,
+    Config,
+    Price,
+}
 
-use soroban_sdk::{contract, contractimpl, Address, Env, Vec};
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OracleConfig {
+    pub oracle_address: Address,
+    pub decimals: u32,
+    pub asset_peg: u32,
+    pub max_staleness: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PriceData {
+    pub price: u64,
+    pub updated_at: u64,
+}
+
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum Error {
+    OracleStalePrice = 1001,
+    OracleNotConfigured = 1002,
+    InvalidPrice = 1003,
+    OracleLocked = 1004,
+    CalculationOverflow = 1005,
+    NotAuthorized = 1006,
+    AlreadyInitialized = 1007,
+    NoPriceAvailable = 1008,
+    ArithmeticOverflow = 1009,
+    InvalidDecimals = 1010,
+}
 
 #[contract]
-pub struct DripOracle;
+pub struct TwapOracle;
 
 #[contractimpl]
-impl DripOracle {
-    /// One-time setup. Stores the admin address and asserts the contract
-    /// has not already been initialized so a re-init cannot point the
-    /// whitelists and configs at an attacker-controlled state.
-    pub fn init(env: Env, admin: Address) -> Result<(), Error> {
+impl TwapOracle {
+    pub fn initialize(env: Env, admin: Address) -> Result<(), Error> {
         if env.storage().instance().has(&DataKey::Admin) {
             return Err(Error::AlreadyInitialized);
         }
@@ -49,261 +54,309 @@ impl DripOracle {
         Ok(())
     }
 
-    /// Configure an asset's per-feed parameters. Admin-only.
-    ///
-    /// Rejects:
-    ///   * `decimals > MAX_DECIMALS` — overflows u128 in any
-    ///     `value * 10^decimals` computation downstream.
-    ///   * `window_size == 0` or `max_staleness == 0` — would force
-    ///     every read to fail.
-    ///   * `window_size > max_staleness` — a TWAP read across a window
-    ///     that the freshness check itself rejects is nonsense.
-    pub fn configure_asset(
-        env: Env,
-        admin: Address,
-        asset: Address,
-        decimals: u32,
-        window_size: u64,
-        max_staleness: u64,
-    ) -> Result<(), Error> {
-        admin::require_admin(&env, &admin)?;
+    pub fn configure_oracle(env: Env, caller: Address, config: OracleConfig) -> Result<(), Error> {
+        require_admin(&env, &caller)?;
 
-        if decimals > MAX_DECIMALS || window_size == 0 || max_staleness == 0 {
-            return Err(Error::InvalidConfig);
+        if config.decimals > 38 {
+            return Err(Error::InvalidDecimals);
         }
-        // Note: we intentionally do NOT enforce `window_size <= max_staleness` here.
-        // The earlier invariant `window <= stale` made the `PriceStale` error
-        // unreachable in `get_twap` because staleness (`advance > stale`) and
-        // in-window (`window >= advance`) become mutually exclusive. Allowing
-        // `window > stale` is the standard oracle pattern (longer TWAP lookback
-        // than freshness) and restores the PriceStale path.
 
-        let cfg = AssetConfig {
-            decimals,
-            window_size,
-            max_staleness,
-        };
-        env.storage()
-            .instance()
-            .set(&DataKey::AssetConfig(asset), &cfg);
+        env.storage().instance().set(&DataKey::Config, &config);
         Ok(())
     }
 
-    /// Append `oracle` to the asset's whitelist. Admin-only. Idempotent.
-    pub fn add_oracle(
-        env: Env,
-        admin: Address,
-        asset: Address,
-        oracle: Address,
-    ) -> Result<(), Error> {
-        admin::require_admin(&env, &admin)?;
+    pub fn submit_price(env: Env, caller: Address, price: u64) -> Result<(), Error> {
+        require_admin(&env, &caller)?;
 
-        if !is_asset_configured(&env, &asset) {
-            return Err(Error::AssetNotConfigured);
-        }
-
-        let key = DataKey::Oracles(asset.clone());
-        let mut list: Vec<Address> = env
-            .storage()
-            .persistent()
-            .get(&key)
-            .unwrap_or(Vec::new(&env));
-
-        if !list_contains(&list, &oracle) {
-            list.push_back(oracle);
-            env.storage().persistent().set(&key, &list);
-            bump_persistent(&env, &key);
-        }
-        Ok(())
-    }
-
-    /// Remove `oracle` from the asset's whitelist. Admin-only. No-op if
-    /// absent (idempotent).
-    pub fn remove_oracle(
-        env: Env,
-        admin: Address,
-        asset: Address,
-        oracle: Address,
-    ) -> Result<(), Error> {
-        admin::require_admin(&env, &admin)?;
-
-        let key = DataKey::Oracles(asset.clone());
-        let list: Vec<Address> = env
-            .storage()
-            .persistent()
-            .get(&key)
-            .unwrap_or(Vec::new(&env));
-
-        let mut new_list: Vec<Address> = Vec::new(&env);
-        let mut changed = false;
-        let mut i: u32 = 0;
-        while i < list.len() {
-            if list.get(i).expect("idx bounded by len") == oracle {
-                changed = true;
-            } else {
-                new_list.push_back(list.get(i).expect("idx bounded by len"));
-            }
-            i += 1;
-        }
-        if changed {
-            env.storage().persistent().set(&key, &new_list);
-            bump_persistent(&env, &key);
-        }
-        Ok(())
-    }
-
-    /// Accept a new price observation from a whitelisted oracle.
-    ///
-    /// Auth: `oracle.require_auth()` — the on-chain relayer signs.
-    /// Monotonic: a submitted `timestamp` must be strictly greater than
-    /// the latest stored observation's timestamp and within
-    /// `CLOCK_DRIFT_TOLERANCE` of the ledger clock.
-    /// Buffer rollover: at `BUFFER_MAX` entries the oldest is dropped.
-    pub fn submit_observation(
-        env: Env,
-        oracle: Address,
-        asset: Address,
-        price: i128,
-        timestamp: u64,
-    ) -> Result<(), Error> {
-        // Auth first — a non-whitelisted-oracle-but-signed relayer
-        // still wastes the auth if we don't check whitelist.
-        oracle.require_auth();
-
-        if price <= 0 {
+        if price == 0 {
             return Err(Error::InvalidPrice);
         }
 
-        if !is_asset_configured(&env, &asset) {
-            return Err(Error::AssetNotConfigured);
-        }
-
-        // Whitelist enforcement.
-        let oracles_key = DataKey::Oracles(asset.clone());
-        let oracles: Vec<Address> = env
-            .storage()
-            .persistent()
-            .get(&oracles_key)
-            .unwrap_or(Vec::new(&env));
-        if !list_contains(&oracles, &oracle) {
-            return Err(Error::OracleNotWhitelisted);
-        }
-
-        // Timestamp sanity.
-        let now = env.ledger().timestamp();
-        if timestamp > now + twap::CLOCK_DRIFT_TOLERANCE {
-            return Err(Error::TimestampInvalid);
-        }
-
-        // Monotonic check + buffer rollover.
-        let obs_key = DataKey::Observations(asset.clone());
-        let mut buf: Vec<Observation> = env
-            .storage()
-            .persistent()
-            .get(&obs_key)
-            .unwrap_or(Vec::new(&env));
-
-        if let Some(last) = buf.last() {
-            if timestamp <= last.timestamp {
-                return Err(Error::TimestampInvalid);
-            }
-        }
-
-        buf.push_back(Observation {
+        let data = PriceData {
             price,
-            timestamp,
-            oracle: oracle.clone(),
-        });
-        if buf.len() > BUFFER_MAX {
-            buf.remove(0);
-        }
-
-        env.storage().persistent().set(&obs_key, &buf);
-        bump_persistent(&env, &obs_key);
-        // Touch the whitelist entry's TTL too — push activity counts
-        // as maintenance for the asset's persistent surface.
-        bump_persistent(&env, &oracles_key);
+            updated_at: env.ledger().timestamp(),
+        };
+        env.storage().instance().set(&DataKey::Price, &data);
         Ok(())
     }
 
-    /// Read-only: TWAP over the configured window. Returns
-    /// `(price, decimals)`; callers normalize as needed.
-    /// Errors:
-    ///   * `AssetNotConfigured` if the asset has no config.
-    ///   * `PriceStale` if the most recent observation is older than
-    ///     `max_staleness`.
-    ///   * `InsufficientSamples` if the window cannot be reconstructed.
-    ///   * `ArithmeticOverflow` if the weighted-sum math overflows.
-    pub fn get_twap(env: Env, asset: Address) -> Result<(i128, u32), Error> {
-        let config: AssetConfig = env
+    pub fn get_twap_price(env: Env) -> Result<u64, Error> {
+        let lock_key = soroban_sdk::symbol_short!("O_Lock");
+        let is_locked: bool = env.storage().instance().get(&lock_key).unwrap_or(false);
+        if is_locked {
+            return Err(Error::OracleLocked);
+        }
+
+        env.storage().instance().set(&lock_key, &true);
+
+        let config: OracleConfig = match env.storage().instance().get(&DataKey::Config) {
+            Some(cfg) => cfg,
+            None => {
+                env.storage().instance().set(&lock_key, &false);
+                return Err(Error::OracleNotConfigured);
+            }
+        };
+
+        let data: PriceData = match env.storage().instance().get(&DataKey::Price) {
+            Some(d) => d,
+            None => {
+                env.storage().instance().set(&lock_key, &false);
+                return Err(Error::NoPriceAvailable);
+            }
+        };
+
+        let age = env.ledger().timestamp().saturating_sub(data.updated_at);
+        if age > config.max_staleness {
+            env.storage().instance().set(&lock_key, &false);
+            return Err(Error::OracleStalePrice);
+        }
+
+        if data.price == 0 {
+            env.storage().instance().set(&lock_key, &false);
+            return Err(Error::InvalidPrice);
+        }
+
+        env.storage().instance().set(&lock_key, &false);
+        Ok(data.price)
+    }
+
+    pub fn calculate_fiat_stream_payout(env: Env, token_amount: u64) -> Result<u64, Error> {
+        let current_price = Self::get_twap_price(env.clone())?;
+
+        let config: OracleConfig = env
             .storage()
             .instance()
-            .get(&DataKey::AssetConfig(asset.clone()))
-            .ok_or(Error::AssetNotConfigured)?;
+            .get(&DataKey::Config)
+            .ok_or(Error::OracleNotConfigured)?;
 
-        let observations: Vec<Observation> = env
-            .storage()
-            .persistent()
-            .get(&DataKey::Observations(asset))
-            .unwrap_or(Vec::new(&env));
+        let precision = 10u128
+            .checked_pow(config.decimals)
+            .ok_or(Error::InvalidDecimals)?;
 
-        let price = twap::compute(&env, &observations, &config)?;
-        Ok((price, config.decimals))
-    }
+        let value = (token_amount as u128)
+            .checked_mul(current_price as u128)
+            .ok_or(Error::ArithmeticOverflow)?
+            / precision;
 
-    // ── Read-only accessors ────────────────────────────────────────────
-
-    /// Number of oracles currently whitelisted for `asset`.
-    pub fn oracle_count(env: Env, asset: Address) -> u32 {
-        env.storage()
-            .persistent()
-            .get(&DataKey::Oracles(asset))
-            .map(|v: Vec<Address>| v.len())
-            .unwrap_or(0)
-    }
-
-    /// Number of observations currently buffered for `asset`.
-    pub fn observation_count(env: Env, asset: Address) -> u32 {
-        env.storage()
-            .persistent()
-            .get(&DataKey::Observations(asset))
-            .map(|v: Vec<Observation>| v.len())
-            .unwrap_or(0)
-    }
-
-    /// Whether `oracle` is on the whitelist for `asset`.
-    pub fn is_whitelisted(env: Env, asset: Address, oracle: Address) -> bool {
-        match env
-            .storage()
-            .persistent()
-            .get::<DataKey, Vec<Address>>(&DataKey::Oracles(asset))
-        {
-            Some(v) => list_contains(&v, &oracle),
-            None => false,
+        if value > u64::MAX as u128 {
+            return Err(Error::ArithmeticOverflow);
         }
-    }
 
-    /// The stored admin address. `None` if `init` has not been called.
-    pub fn admin_address(env: Env) -> Option<Address> {
-        env.storage().instance().get(&DataKey::Admin)
+        Ok(value as u64)
     }
 }
 
-// ─── Free-function helpers (intentionally not on the contract) ────────
-
-fn is_asset_configured(env: &Env, asset: &Address) -> bool {
-    env.storage()
+fn require_admin(env: &Env, caller: &Address) -> Result<(), Error> {
+    let admin: Address = env
+        .storage()
         .instance()
-        .has(&DataKey::AssetConfig(asset.clone()))
+        .get(&DataKey::Admin)
+        .ok_or(Error::OracleNotConfigured)?;
+    if *caller != admin {
+        return Err(Error::NotAuthorized);
+    }
+    caller.require_auth();
+    Ok(())
 }
 
-fn list_contains(list: &Vec<Address>, needle: &Address) -> bool {
-    let mut i: u32 = 0;
-    while i < list.len() {
-        if list.get(i).expect("idx bounded by len") == *needle {
-            return true;
-        }
-        i += 1;
+#[cfg(test)]
+mod tests {
+    extern crate std;
+
+    use soroban_sdk::{
+        testutils::{Address as _, Ledger, LedgerInfo},
+        Address, Env,
+    };
+
+    use super::*;
+
+    fn setup() -> (Env, TwapOracleClient<'static>, Address) {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let contract_id = env.register_contract(None, TwapOracle);
+        let client = TwapOracleClient::new(&env, &contract_id);
+        (env, client, admin)
     }
-    false
+
+    #[test]
+    fn initialize_sets_admin() {
+        let (_env, client, admin) = setup();
+        client.initialize(&admin);
+        // Second init should fail
+        let result = client.try_initialize(&admin);
+        assert_eq!(result, Err(Ok(Error::AlreadyInitialized)));
+    }
+
+    #[test]
+    fn configure_oracle_requires_admin() {
+        let (env, client, admin) = setup();
+        client.initialize(&admin);
+
+        let oracle_addr = Address::generate(&env);
+        let config = OracleConfig {
+            oracle_address: oracle_addr,
+            decimals: 8,
+            asset_peg: 1,
+            max_staleness: 300,
+        };
+        client.configure_oracle(&admin, &config);
+
+        let non_admin = Address::generate(&env);
+        let result = client.try_configure_oracle(&non_admin, &config);
+        assert_eq!(result, Err(Ok(Error::NotAuthorized)));
+    }
+
+    #[test]
+    fn configure_oracle_rejects_excessive_decimals() {
+        let (env, client, admin) = setup();
+        client.initialize(&admin);
+
+        let oracle_addr = Address::generate(&env);
+        let config = OracleConfig {
+            oracle_address: oracle_addr,
+            decimals: 39,
+            asset_peg: 1,
+            max_staleness: 300,
+        };
+        let result = client.try_configure_oracle(&admin, &config);
+        assert_eq!(result, Err(Ok(Error::InvalidDecimals)));
+    }
+
+    #[test]
+    fn submit_price_requires_admin() {
+        let (env, client, admin) = setup();
+        client.initialize(&admin);
+
+        let result = client.try_submit_price(&Address::generate(&env), &100);
+        assert_eq!(result, Err(Ok(Error::NotAuthorized)));
+    }
+
+    #[test]
+    fn submit_price_rejects_zero() {
+        let (_env, client, admin) = setup();
+        client.initialize(&admin);
+
+        let result = client.try_submit_price(&admin, &0);
+        assert_eq!(result, Err(Ok(Error::InvalidPrice)));
+    }
+
+    #[test]
+    fn get_twap_price_requires_config() {
+        let (_env, client, _admin) = setup();
+        let result = client.try_get_twap_price();
+        assert_eq!(result, Err(Ok(Error::OracleNotConfigured)));
+    }
+
+    #[test]
+    fn get_twap_price_requires_price_submission() {
+        let (env, client, admin) = setup();
+        client.initialize(&admin);
+
+        let oracle_addr = Address::generate(&env);
+        let config = OracleConfig {
+            oracle_address: oracle_addr,
+            decimals: 8,
+            asset_peg: 1,
+            max_staleness: 300,
+        };
+        client.configure_oracle(&admin, &config);
+
+        let result = client.try_get_twap_price();
+        assert_eq!(result, Err(Ok(Error::NoPriceAvailable)));
+    }
+
+    #[test]
+    fn get_twap_price_rejects_stale_price() {
+        let (env, client, admin) = setup();
+        client.initialize(&admin);
+
+        let oracle_addr = Address::generate(&env);
+        let config = OracleConfig {
+            oracle_address: oracle_addr,
+            decimals: 8,
+            asset_peg: 1,
+            max_staleness: 60,
+        };
+        client.configure_oracle(&admin, &config);
+
+        client.submit_price(&admin, &50_000_000);
+
+        // Advance time beyond max_staleness
+        env.ledger().set(LedgerInfo {
+            timestamp: 1_000_000 + 61,
+            protocol_version: 21,
+            sequence_number: 1,
+            network_id: Default::default(),
+            base_reserve: 10,
+            min_temp_entry_ttl: 16,
+            min_persistent_entry_ttl: 4096,
+            max_entry_ttl: 6_312_000,
+        });
+
+        let result = client.try_get_twap_price();
+        assert_eq!(result, Err(Ok(Error::OracleStalePrice)));
+    }
+
+    #[test]
+    fn get_twap_price_returns_fresh_price() {
+        let (env, client, admin) = setup();
+        client.initialize(&admin);
+
+        let oracle_addr = Address::generate(&env);
+        let config = OracleConfig {
+            oracle_address: oracle_addr,
+            decimals: 8,
+            asset_peg: 1,
+            max_staleness: 300,
+        };
+        client.configure_oracle(&admin, &config);
+
+        client.submit_price(&admin, &50_000_000);
+
+        let price = client.get_twap_price();
+        assert_eq!(price, 50_000_000);
+    }
+
+    #[test]
+    fn calculate_fiat_stream_payout_works() {
+        let (env, client, admin) = setup();
+        client.initialize(&admin);
+
+        let oracle_addr = Address::generate(&env);
+        let config = OracleConfig {
+            oracle_address: oracle_addr,
+            decimals: 8,
+            asset_peg: 1,
+            max_staleness: 300,
+        };
+        client.configure_oracle(&admin, &config);
+
+        // Price = 50_000_000 with 8 decimals = $0.50 per token
+        client.submit_price(&admin, &50_000_000);
+
+        // 100 tokens * 50_000_000 / 10^8 = 50
+        let payout = client.calculate_fiat_stream_payout(&100);
+        assert_eq!(payout, 50);
+    }
+
+    #[test]
+    fn calculate_fiat_stream_payout_overflow() {
+        let (env, client, admin) = setup();
+        client.initialize(&admin);
+
+        let oracle_addr = Address::generate(&env);
+        let config = OracleConfig {
+            oracle_address: oracle_addr,
+            decimals: 0,
+            asset_peg: 1,
+            max_staleness: 300,
+        };
+        client.configure_oracle(&admin, &config);
+
+        client.submit_price(&admin, &u64::MAX);
+
+        let result = client.try_calculate_fiat_stream_payout(&(u64::MAX));
+        assert_eq!(result, Err(Ok(Error::ArithmeticOverflow)));
+    }
 }
