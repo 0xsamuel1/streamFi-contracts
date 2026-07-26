@@ -431,3 +431,71 @@ fn protocol_fee_bps_defaults_to_30_when_uninitialized() {
     let client = DripFactoryClient::new(&env, &id);
     assert_eq!(client.protocol_fee_bps(), 30);
 }
+
+// ── Reentrancy guard ────────────────────────────────────────────────────────
+
+#[test]
+fn create_stream_rejects_reentrant_call_while_locked() {
+    use drip_factory::storage::DataKey;
+
+    let env = base_env();
+    let client = deploy_factory(&env);
+    let sender = Address::generate(&env);
+    let recip = Address::generate(&env);
+    let token = make_token(&env, &sender, 10_000);
+    let now = env.ledger().timestamp();
+
+    // Simulates a malicious `token.transfer()` reentering `create_stream`
+    // mid-call: the lock is already held when this call is made, so it
+    // must be rejected with CreateLocked rather than racing StreamCount.
+    env.as_contract(&client.address, || {
+        env.storage().instance().set(&DataKey::CreateLock, &true);
+    });
+
+    let result = client.try_create_stream(
+        &sender,
+        &recip,
+        &token,
+        &10_000,
+        &1,
+        &(now + 100),
+        &(now + 3_700),
+        &false,
+    );
+    assert_eq!(result, Err(Ok(Error::CreateLocked)));
+}
+
+#[test]
+fn create_stream_lock_does_not_block_validation_failures() {
+    use drip_factory::storage::DataKey;
+
+    let env = base_env();
+    let client = deploy_factory(&env);
+    let sender = Address::generate(&env);
+    let recip = Address::generate(&env);
+    let token = make_token(&env, &sender, 10_000);
+    let now = env.ledger().timestamp();
+
+    // A call that fails input validation (zero deposit) never reaches the
+    // lock check, so it must still surface its own specific error rather
+    // than CreateLocked, and the lock itself is confirmed unset afterward.
+    let result = client.try_create_stream(
+        &sender,
+        &recip,
+        &token,
+        &0,
+        &100,
+        &(now + 100),
+        &(now + 3_700),
+        &false,
+    );
+    assert_eq!(result, Err(Ok(Error::InvalidDeposit)));
+
+    let locked: bool = env.as_contract(&client.address, || {
+        env.storage()
+            .instance()
+            .get(&DataKey::CreateLock)
+            .unwrap_or(false)
+    });
+    assert!(!locked);
+}
