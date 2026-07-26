@@ -91,4 +91,15 @@ pub enum DataKey {
     /// Value: `u64` — the last stream ID whose persistent `StreamAddr` TTL
     /// was bumped by the walker. Missing entry is treated as `0`.
     LastBumpedId,
+
+    /// **Instance storage.** Reentrancy guard for `create_stream`.
+    /// Key: `DataKey::CreateLock` (no inner type, discriminant only)
+    /// Value: `bool` — `true` while a `create_stream` call is mid-flight.
+    /// `token` is caller-supplied and may be an untrusted/non-conforming
+    /// contract; without this guard, a malicious `transfer` implementation
+    /// could call back into `create_stream` before the outer call finishes
+    /// and observe/mutate `StreamCount` and the registry indices twice for
+    /// what should be a single atomic creation. A missing entry is treated
+    /// as `false`/unlocked.
+    CreateLock,
 }

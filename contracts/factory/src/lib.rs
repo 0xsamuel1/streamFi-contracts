@@ -137,13 +137,39 @@ impl DripFactory {
         let config = governance::config(&env, &governor)?;
         governance::enforce_bounds(&config, rate_per_sec, start_time, end_time)?;
 
+        // ── Reentrancy guard ─────────────────────────────────────────────
+        // `token` is caller-supplied and may not be a well-behaved SEP-41
+        // asset. A malicious `transfer` implementation could call back into
+        // `create_stream` before this call finishes; the lock (combined with
+        // Soroban's all-or-nothing transaction semantics, which roll back
+        // every storage write made so far if any nested call returns `Err`)
+        // turns a reentrant attempt into a full transaction abort instead of
+        // a corrupted `StreamCount`/registry state.
+        if env
+            .storage()
+            .instance()
+            .get(&DataKey::CreateLock)
+            .unwrap_or(false)
+        {
+            return Err(Error::CreateLocked);
+        }
+        env.storage().instance().set(&DataKey::CreateLock, &true);
+
         // ── All validation passed — safe to touch state now ──────────────
         ttl::bump_instance(&env);
 
         // ── Pull deposit from sender ──────────────────────────────────────
         // Using the aliased `tok` to avoid any future shadowing issues.
         let tk = tok::Client::new(&env, &token);
-        tk.transfer(&sender, &env.current_contract_address(), &deposit);
+        let factory_addr = env.current_contract_address();
+        let factory_balance_before = tk.balance(&factory_addr);
+        tk.transfer(&sender, &factory_addr, &deposit);
+        // Confirm the deposit actually arrived — a non-conforming token
+        // could return successfully from `transfer` without moving funds.
+        if tk.balance(&factory_addr) != factory_balance_before + deposit {
+            env.storage().instance().set(&DataKey::CreateLock, &false);
+            return Err(Error::DepositTransferFailed);
+        }
 
         // ── Assign stream ID ─────────────────────────────────────────────
         let stream_count: u64 = env
@@ -153,11 +179,13 @@ impl DripFactory {
             .unwrap_or(0);
         let stream_id = stream_count;
 
-        let wasm_hash: BytesN<32> = env
-            .storage()
-            .instance()
-            .get(&DataKey::StreamWasmHash)
-            .ok_or(Error::NotInitialized)?;
+        let wasm_hash: BytesN<32> = match env.storage().instance().get(&DataKey::StreamWasmHash) {
+            Some(hash) => hash,
+            None => {
+                env.storage().instance().set(&DataKey::CreateLock, &false);
+                return Err(Error::NotInitialized);
+            }
+        };
 
         // ── Deploy DripStream ────────────────────────────────────────────
         let init_args = soroban_sdk::vec![
@@ -174,7 +202,12 @@ impl DripFactory {
         let stream_addr = deploy::deploy_stream(&env, &wasm_hash, stream_id, init_args);
 
         // Forward the deposit into the newly deployed stream contract.
-        tk.transfer(&env.current_contract_address(), &stream_addr, &deposit);
+        let stream_balance_before = tk.balance(&stream_addr);
+        tk.transfer(&factory_addr, &stream_addr, &deposit);
+        if tk.balance(&stream_addr) != stream_balance_before + deposit {
+            env.storage().instance().set(&DataKey::CreateLock, &false);
+            return Err(Error::StreamFundingFailed);
+        }
 
         // ── Index ─────────────────────────────────────────────────────────
         // StreamAddr and the sender/recipient indices grow without bound, so
@@ -239,6 +272,7 @@ impl DripFactory {
             ttl::EXTEND_TO,
         );
 
+        env.storage().instance().set(&DataKey::CreateLock, &false);
         Ok(stream_id)
     }
 

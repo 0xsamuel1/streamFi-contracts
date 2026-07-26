@@ -38,4 +38,10 @@ pub enum Error {
     SignatureExpired = 21,
     /// The recipient is the all-zero Stellar account address.
     InvalidRecipient = 22,
+    /// Another `create_stream` call is already in progress (reentrancy guard).
+    CreateLocked = 23,
+    /// The deposit transfer from `sender` to the factory did not arrive.
+    DepositTransferFailed = 24,
+    /// The deposit forward from the factory to the deployed stream did not arrive.
+    StreamFundingFailed = 25,
 }
