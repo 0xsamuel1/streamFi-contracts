@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { useMutation, gql } from '@apollo/client';
 import { validateStreamPayload } from './lib/validateStreamPayload';
+import { GET_DASHBOARD_SUMMARY } from './Dashboard';
 
 const SUBMIT_STREAM_REQUEST = gql`
   mutation SubmitStreamRequest($recipient: String!, $amount: Float!, $ratePerSecond: Float!) {
@@ -17,7 +18,10 @@ export const WalletConnection: React.FC = () => {
   const [ratePerSecond, setRatePerSecond] = useState('');
   const [validationErrors, setValidationErrors] = useState<string[]>([]);
 
-  const [submitStreamRequest, { loading }] = useMutation(SUBMIT_STREAM_REQUEST);
+  const [submitStreamRequest, { loading }] = useMutation(SUBMIT_STREAM_REQUEST, {
+    refetchQueries: [{ query: GET_DASHBOARD_SUMMARY }],
+    awaitRefetchQueries: true,
+  });
 
   const handleSubmit = async (event: React.FormEvent) => {
     event.preventDefault();

@@ -2,7 +2,7 @@ import React, { useState } from "react";
 import { useQuery, gql } from "@apollo/client";
 import styles from "./Dashboard.module.css";
 
-const GET_DASHBOARD_SUMMARY = gql`
+export const GET_DASHBOARD_SUMMARY = gql`
   query GetDashboardSummary {
     dashboardSummary {
       activeStreams
