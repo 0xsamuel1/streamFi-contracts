@@ -161,10 +161,7 @@ pub fn unlock(env: &Env) {
 ///     state::with_guard(&env, |env| Self::_withdraw(env, amount))
 /// }
 /// ```
-pub fn with_guard<R>(
-    env: &Env,
-    f: impl FnOnce(&Env) -> Result<R, Error>,
-) -> Result<R, Error> {
+pub fn with_guard<R>(env: &Env, f: impl FnOnce(&Env) -> Result<R, Error>) -> Result<R, Error> {
     lock(env)?;
     let result = f(env);
     unlock(env);
