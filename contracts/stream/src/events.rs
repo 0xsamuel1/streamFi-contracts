@@ -7,6 +7,9 @@ use crate::{storage::DataKey, Error};
 /// Event publication and storage writes are part of the same Soroban
 /// transaction, so either both commit or both are rolled back. Existing
 /// streams that predate this key start at sequence zero.
+///
+/// Boundary check: `current` is validated to prevent arithmetic overflow
+/// on the sequence counter (which would silently consume future events).
 fn next_sequence(env: &Env) -> u64 {
     let storage = env.storage().instance();
     let current = storage.get::<_, u64>(&DataKey::EventSequence).unwrap_or(0);
@@ -17,6 +20,16 @@ fn next_sequence(env: &Env) -> u64 {
     next
 }
 
+/// Validate that an `i128` amount is non-negative. A negative value is always
+/// invalid for a payout, withdrawal, or balance field and indicates a corrupted
+/// or unexpected state. Panics with `Error::InvalidAmount` so the caller
+/// cannot silently emit a malformed event.
+fn assert_non_negative_amount(env: &Env, value: i128) {
+    if value < 0 {
+        panic_with_error!(env, Error::InvalidAmount);
+    }
+}
+
 pub fn withdrawn(
     env: &Env,
     recipient: &Address,
@@ -24,6 +37,10 @@ pub fn withdrawn(
     total_withdrawn: i128,
     remaining: i128,
 ) {
+    // Boundary checks before any state mutation or event emission.
+    assert_non_negative_amount(env, amount);
+    assert_non_negative_amount(env, total_withdrawn);
+
     let sequence = next_sequence(env);
     env.events().publish(
         (symbol_short!("withdrawn"), recipient.clone(), sequence),
@@ -32,6 +49,9 @@ pub fn withdrawn(
 }
 
 pub fn cancelled(env: &Env, sender: &Address, refund_amount: i128, withdrawn_so_far: i128) {
+    assert_non_negative_amount(env, refund_amount);
+    assert_non_negative_amount(env, withdrawn_so_far);
+
     let sequence = next_sequence(env);
     env.events().publish(
         (symbol_short!("cancelled"), sender.clone(), sequence),
@@ -40,6 +60,8 @@ pub fn cancelled(env: &Env, sender: &Address, refund_amount: i128, withdrawn_so_
 }
 
 pub fn paused(env: &Env, sender: &Address, paused_at: u64, withdrawable: i128) {
+    assert_non_negative_amount(env, withdrawable);
+
     let sequence = next_sequence(env);
     env.events().publish(
         (symbol_short!("paused"), sender.clone(), sequence),
@@ -56,6 +78,9 @@ pub fn resumed(env: &Env, sender: &Address, resumed_at: u64) {
 }
 
 pub fn topped_up(env: &Env, sender: &Address, amount: i128, new_balance: i128) {
+    assert_non_negative_amount(env, amount);
+    assert_non_negative_amount(env, new_balance);
+
     let sequence = next_sequence(env);
     env.events().publish(
         (symbol_short!("topped_up"), sender.clone(), sequence),
@@ -64,6 +89,8 @@ pub fn topped_up(env: &Env, sender: &Address, amount: i128, new_balance: i128) {
 }
 
 pub fn clawback(env: &Env, sender: &Address, amount: i128) {
+    assert_non_negative_amount(env, amount);
+
     let sequence = next_sequence(env);
     env.events().publish(
         (symbol_short!("clawback"), sender.clone(), sequence),
