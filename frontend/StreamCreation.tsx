@@ -1,10 +1,12 @@
 import React, { useState } from 'react';
+import { validateStreamPayload } from './lib/validateStreamPayload';
 
 const RPC_TIMEOUT_MS = 10_000;
 
 interface CreateStreamPayload {
   recipient: string;
   amount: number;
+  ratePerSecond: number;
 }
 
 async function createStreamOnChain(payload: CreateStreamPayload): Promise<{ streamId: string }> {
@@ -24,12 +26,21 @@ async function createStreamOnChain(payload: CreateStreamPayload): Promise<{ stre
 export const StreamCreation: React.FC = () => {
   const [recipient, setRecipient] = useState('');
   const [amount, setAmount] = useState('');
+  const [ratePerSecond, setRatePerSecond] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const handleSubmit = async (event: React.FormEvent) => {
     event.preventDefault();
     setError(null);
+
+    const payload = { recipient, amount: Number(amount), ratePerSecond: Number(ratePerSecond) };
+    const result = validateStreamPayload(payload);
+    if (!result.valid) {
+      setError(result.errors.join(', '));
+      return;
+    }
+
     setLoading(true);
 
     // FIX for Bug #150: the previous implementation awaited the RPC call
@@ -42,7 +53,7 @@ export const StreamCreation: React.FC = () => {
     });
 
     try {
-      await Promise.race([createStreamOnChain({ recipient, amount: Number(amount) }), timeout]);
+      await Promise.race([createStreamOnChain(payload), timeout]);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to create stream.');
     } finally {
@@ -62,6 +73,11 @@ export const StreamCreation: React.FC = () => {
       <label>
         Amount
         <input value={amount} onChange={(e) => setAmount(e.target.value)} />
+      </label>
+
+      <label>
+        Rate per second
+        <input value={ratePerSecond} onChange={(e) => setRatePerSecond(e.target.value)} />
       </label>
 
       {error && <p className="error">{error}</p>}
