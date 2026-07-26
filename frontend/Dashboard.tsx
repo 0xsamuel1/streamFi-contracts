@@ -1,5 +1,6 @@
-import React, { useState } from 'react';
-import { useQuery, gql } from '@apollo/client';
+import React, { useState } from "react";
+import { useQuery, gql } from "@apollo/client";
+import styles from "./Dashboard.module.css";
 
 const GET_DASHBOARD_SUMMARY = gql`
   query GetDashboardSummary {
@@ -11,7 +12,7 @@ const GET_DASHBOARD_SUMMARY = gql`
   }
 `;
 
-type MetricKey = 'activeStreams' | 'totalStreamed' | 'totalWithdrawn';
+type MetricKey = "activeStreams" | "totalStreamed" | "totalWithdrawn";
 
 export const Dashboard: React.FC = () => {
   const { data, loading, error } = useQuery(GET_DASHBOARD_SUMMARY);
@@ -36,26 +37,39 @@ export const Dashboard: React.FC = () => {
   };
 
   return (
-    <div className="dashboard">
-      <h2>Dashboard</h2>
-      <ul>
-        <li>
-          <button onClick={() => setSelectedMetric('activeStreams')}>
+    <div className={styles.dashboard}>
+      <h2 className={styles.title}>Dashboard</h2>
+      <ul className={styles.metricList}>
+        <li className={styles.metricItem}>
+          <button
+            className={styles.metricButton}
+            onClick={() => setSelectedMetric("activeStreams")}
+          >
             Active streams: {summary.activeStreams}
           </button>
         </li>
-        <li>
-          <button onClick={() => setSelectedMetric('totalStreamed')}>
+        <li className={styles.metricItem}>
+          <button
+            className={styles.metricButton}
+            onClick={() => setSelectedMetric("totalStreamed")}
+          >
             Total streamed: {summary.totalStreamed}
           </button>
         </li>
-        <li>
-          <button onClick={() => setSelectedMetric('totalWithdrawn')}>
+        <li className={styles.metricItem}>
+          <button
+            className={styles.metricButton}
+            onClick={() => setSelectedMetric("totalWithdrawn")}
+          >
             Total withdrawn: {summary.totalWithdrawn}
           </button>
         </li>
       </ul>
-      {selectedMetric && <p>Selected metric: {selectedMetric}</p>}
+      {selectedMetric && (
+        <p className={styles.selectedLabel}>
+          Selected metric: {selectedMetric}
+        </p>
+      )}
     </div>
   );
 };
