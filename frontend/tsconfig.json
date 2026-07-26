@@ -10,7 +10,7 @@
     "skipLibCheck": true,
     "strict": true,
     "types": ["react", "react-dom"],
-    "ignoreDeprecations": "6.0"
+    "ignoreDeprecations": "5.0"
   },
   "include": ["src", "**/*.ts", "**/*.tsx"]
 }
