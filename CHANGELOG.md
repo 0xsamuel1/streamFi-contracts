@@ -5,11 +5,9 @@ All notable changes are documented here. Format based on [Keep a Changelog](http
 ## [Unreleased]
 
 ### Fixed
+- Settings page broken CSS in production — added proper Tailwind flexbox layouts with dark mode support (conduit-protocol/streamFi-app#270, closes #157)
+- Settings page crash on load — created `app/settings/page.tsx` with properly guarded state initialization (conduit-protocol/streamFi-app#270, closes #156)
 - Token selector stale Apollo cache — added `onRefreshNeeded` callback for parent cache invalidation (conduit-protocol/streamFi-app#270, closes #153)
-
-### Fixed
-- Token selector stale Apollo cache — added `onRefreshNeeded` callback for parent cache invalidation (conduit-protocol/streamFi-app#270, closes #153)
-
 ### Added
 - Emergency pause on `DripFactory` — governor-gated `pause()`/`unpause()` halt all new `create_stream` calls during a protocol emergency; `is_paused()` view exposes the flag so the stream contract and off-chain infra can also gate withdrawals. Adds `ContractPaused` (11), `AlreadyPaused` (12), and `NotPaused` (13) error codes and a `Paused` instance-storage key
 - `force_cancel()` on `DripStream` — recipient can settle atomically after sender leaves stream paused for more than 30 days (`PauseThresholdNotMet` error returned if threshold not met)
