@@ -138,7 +138,6 @@ fn rapid_repeated_calls_never_diverge_from_the_invoked_sequence() {
     }
 }
 
-#[test]
 // ── Issue #86: upgrade_stream_wasm input validation ─────────────────────────
 
 #[test]
@@ -176,6 +175,7 @@ fn upgrade_stream_wasm_accepts_after_unpause() {
     assert!(result.is_ok());
 }
 
+#[test]
 fn create_stream_rejects_zero_stellar_recipient() {
     let env = base_env();
     let client = deploy_factory(&env);
