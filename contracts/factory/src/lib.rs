@@ -36,6 +36,11 @@ fn is_zero_stellar_account(env: &Env, address: &Address) -> bool {
 
     address == &zero_account
 }
+
+/// Returns true when `hash` is an all-zero 32-byte WASM hash.
+fn is_zero_wasm_hash(env: &Env, hash: &BytesN<32>) -> bool {
+    *hash == BytesN::from_array(env, &[0u8; 32])
+}
 #[contract]
 pub struct DripFactory;
 
@@ -384,6 +389,23 @@ impl DripFactory {
             .get(&DataKey::GovernorAddress)
             .ok_or(Error::NotInitialized)?;
         governor.require_auth();
+
+        // ── Boundary / null checks ───────────────────────────────────────
+        // Reject all-zero WASM hashes — deploying with a zero hash would
+        // deploy a no-op contract, effectively burning all funds sent to
+        // future `create_stream` calls with no way to recover them.
+        if is_zero_wasm_hash(&env, &new_wasm_hash) {
+            return Err(Error::InvalidWasmHash);
+        }
+
+        // ── Lifecycle check ──────────────────────────────────────────────
+        // Block upgrades while the factory is under an emergency pause.
+        // A paused factory should accept no state mutations at all, even
+        // from the governor, so the halt remains comprehensive.
+        if pause::is_paused(&env) {
+            return Err(Error::ContractPaused);
+        }
+
         ttl::bump_instance(&env);
         ttl::bump_persistent_bucket(&env);
         env.storage()
