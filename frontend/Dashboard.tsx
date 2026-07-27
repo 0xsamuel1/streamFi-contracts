@@ -1,8 +1,8 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { useQuery, gql } from "@apollo/client";
 import styles from "./Dashboard.module.css";
 
-const GET_DASHBOARD_SUMMARY = gql`
+export const GET_DASHBOARD_SUMMARY = gql`
   query GetDashboardSummary {
     dashboardSummary {
       activeStreams
@@ -14,8 +14,20 @@ const GET_DASHBOARD_SUMMARY = gql`
 
 type MetricKey = "activeStreams" | "totalStreamed" | "totalWithdrawn";
 
+const DASHBOARD_TIMEOUT_MS = 10_000;
+
 export const Dashboard: React.FC = () => {
   const { data, loading, error } = useQuery(GET_DASHBOARD_SUMMARY);
+  const [timedOut, setTimedOut] = useState(false);
+
+  useEffect(() => {
+    if (!loading) {
+      setTimedOut(false);
+      return;
+    }
+    const timer = setTimeout(() => setTimedOut(true), DASHBOARD_TIMEOUT_MS);
+    return () => clearTimeout(timer);
+  }, [loading]);
 
   // FIX for Bug #151: the previous version read
   // `data.dashboardSummary.activeStreams` directly inside useState's
@@ -27,6 +39,7 @@ export const Dashboard: React.FC = () => {
   // dereference an undefined value.
   const [selectedMetric, setSelectedMetric] = useState<MetricKey | null>(null);
 
+  if (timedOut) return <p>Error loading dashboard: Request timed out.</p>;
   if (loading) return <p>Loading dashboard...</p>;
   if (error) return <p>Error loading dashboard: {error.message}</p>;
 

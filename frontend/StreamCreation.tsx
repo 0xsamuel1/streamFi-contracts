@@ -1,10 +1,12 @@
 import React, { useState } from 'react';
+import { validateStreamPayload } from './lib/validateStreamPayload';
 
 const RPC_TIMEOUT_MS = 10_000;
 
 interface CreateStreamPayload {
   recipient: string;
   amount: number;
+  ratePerSecond: number;
 }
 
 async function createStreamOnChain(payload: CreateStreamPayload): Promise<{ streamId: string }> {
@@ -24,12 +26,30 @@ async function createStreamOnChain(payload: CreateStreamPayload): Promise<{ stre
 export const StreamCreation: React.FC = () => {
   const [recipient, setRecipient] = useState('');
   const [amount, setAmount] = useState('');
+  const [ratePerSecond, setRatePerSecond] = useState('');
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [validationErrors, setValidationErrors] = useState<string[]>([]);
+
+  const validateCurrentInputs = () => {
+    const result = validateStreamPayload({
+      recipient,
+      amount: Number(amount),
+      ratePerSecond: Number(ratePerSecond),
+    });
+    setValidationErrors(result.errors);
+  };
 
   const handleSubmit = async (event: React.FormEvent) => {
     event.preventDefault();
-    setError(null);
+    setValidationErrors([]);
+
+    const payload = { recipient, amount: Number(amount), ratePerSecond: Number(ratePerSecond) };
+    const result = validateStreamPayload(payload);
+    if (!result.valid) {
+      setValidationErrors(result.errors);
+      return;
+    }
+
     setLoading(true);
 
     // FIX for Bug #150: the previous implementation awaited the RPC call
@@ -42,9 +62,9 @@ export const StreamCreation: React.FC = () => {
     });
 
     try {
-      await Promise.race([createStreamOnChain({ recipient, amount: Number(amount) }), timeout]);
+      await Promise.race([createStreamOnChain(payload), timeout]);
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to create stream.');
+      setValidationErrors([e instanceof Error ? e.message : 'Failed to create stream.']);
     } finally {
       setLoading(false);
     }
@@ -56,17 +76,28 @@ export const StreamCreation: React.FC = () => {
 
       <label>
         Recipient address
-        <input value={recipient} onChange={(e) => setRecipient(e.target.value)} />
+        <input value={recipient} onChange={(e) => { setRecipient(e.target.value); validateCurrentInputs(); }} />
       </label>
 
       <label>
         Amount
-        <input value={amount} onChange={(e) => setAmount(e.target.value)} />
+        <input value={amount} onChange={(e) => { setAmount(e.target.value); validateCurrentInputs(); }} />
       </label>
 
-      {error && <p className="error">{error}</p>}
+      <label>
+        Rate per second
+        <input value={ratePerSecond} onChange={(e) => { setRatePerSecond(e.target.value); validateCurrentInputs(); }} />
+      </label>
 
-      <button type="submit" disabled={loading}>
+      {validationErrors.length > 0 && (
+        <ul className="validation-errors">
+          {validationErrors.map((err) => (
+            <li key={err}>{err}</li>
+          ))}
+        </ul>
+      )}
+
+      <button type="submit" disabled={loading || validationErrors.length > 0}>
         {loading ? 'Creating stream...' : 'Create stream'}
       </button>
     </form>
