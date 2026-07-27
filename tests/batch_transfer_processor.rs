@@ -1,20 +1,10 @@
 //! Regression tests for
-//! `conduit_integration_tests::batch_transfer_processor::BatchTransferProcessor`,
-//! locking in the `audit-round-2-v2` fix that switched `Error` from
-//! `#[contracttype]` to `#[contracterror]` + the matching
-//! `Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord` derive set.
+//! `conduit_integration_tests::batch_transfer_processor::BatchTransferProcessor`.
 //!
-//! A future regression to `#[contracttype]` will either:
-//!   (1) fail to compile (the `#[contractimpl]` macro still requires
-//!   `Copy` + `TryFrom<soroban_sdk::Error>` + `From<&Error>`, none of
-//!   which `#[contracttype]` produces), or
-//!   (2) silently mask the `Result<Result<T, Error>, _>` shape clients
-//!   observe, breaking the discriminant assertions below.
-//!
-//! The contract-semantics tests additionally pin the locked-flag
-//! release invariant: the lock must be released after every exit path
-//! except `Error::ProcessorLocked` itself (which short-circuits before
-//! touching the lock).
+//! Covers:
+//! - Basic sum + lock-release contract (audit-round-2-v2)
+//! - Issue #83: Defensive null/boundary guards against NPE edge cases
+//! - Issue #84: State-version race-condition protection
 
 #![cfg(test)]
 
@@ -148,4 +138,144 @@ fn error_type_carries_required_traits_and_named_discriminants() {
     assert_eq!(Error::ProcessorLocked as u32, 2001);
     assert_eq!(Error::CalculationOverflow as u32, 2002);
     assert_eq!(Error::BatchTooLarge as u32, 2003);
+    assert_eq!(Error::StateVersionMismatch as u32, 2004);
+    assert_eq!(Error::StaleCallbackCleaned as u32, 2005);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Issue #83 regression: null / boundary edge cases
+// ────────────────────────────────────────────────────────────────────────��────
+
+#[test]
+fn process_batch_rejects_zero_amount() {
+    let env = Env::default();
+    let client = deploy_processor(&env);
+    // Zero is a degenerate amount that could trigger NPE-like downstream
+    // divide-by-zero or infinite-loop edge cases.
+    let amounts = Vec::from_array(&env, [0u64]);
+    assert_eq!(
+        client.try_process_batch(&amounts),
+        Err(Ok(Error::CalculationOverflow)),
+    );
+    assert!(
+        !lock_state(&env, &client),
+        "lock must be released after zero-amount rejection",
+    );
+}
+
+#[test]
+fn process_batch_rejects_zero_amount_in_mixed_batch() {
+    let env = Env::default();
+    let client = deploy_processor(&env);
+    let amounts = Vec::from_array(&env, [10u64, 0, 30]);
+    assert_eq!(
+        client.try_process_batch(&amounts),
+        Err(Ok(Error::CalculationOverflow)),
+    );
+    assert!(
+        !lock_state(&env, &client),
+        "lock must be released after detecting zero in batch",
+    );
+}
+
+#[test]
+fn process_batch_rejects_single_zero_entry() {
+    let env = Env::default();
+    let client = deploy_processor(&env);
+    let amounts = Vec::from_array(&env, [0u64]);
+    assert_eq!(
+        client.try_process_batch(&amounts),
+        Err(Ok(Error::CalculationOverflow)),
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Issue #84 regression: state-version race-condition guards
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn process_batch_rejects_concurrent_state_mutation() {
+    let env = Env::default();
+    let client = deploy_processor(&env);
+
+    // Simulate a concurrent state mutation by bumping the version
+    // from outside between the snapshot and the final check.
+    let state_ver_key = soroban_sdk::symbol_short!("B_Ver");
+    env.as_contract(&client.address, || {
+        env.storage().instance().set(&state_ver_key, &99_u64);
+    });
+
+    let amounts = Vec::from_array(&env, [10u64, 20]);
+    let result = client.try_process_batch(&amounts);
+    assert_eq!(result, Err(Ok(Error::StateVersionMismatch)));
+    assert!(
+        !lock_state(&env, &client),
+        "lock must be released after version mismatch",
+    );
+}
+
+#[test]
+fn process_batch_increments_version_on_success() {
+    let env = Env::default();
+    let client = deploy_processor(&env);
+    let state_ver_key = soroban_sdk::symbol_short!("B_Ver");
+
+    // Before any call, version is 0.
+    let v0: u64 = env.as_contract(&client.address, || {
+        env.storage().instance().get(&state_ver_key).unwrap_or(0)
+    });
+    assert_eq!(v0, 0);
+
+    // After a successful call, version must have been bumped.
+    let amounts = Vec::from_array(&env, [5u64, 5]);
+    let r = client.try_process_batch(&amounts);
+    assert!(r.is_ok());
+
+    let v1: u64 = env.as_contract(&client.address, || {
+        env.storage().instance().get(&state_ver_key).unwrap_or(0)
+    });
+    assert_eq!(v1, 1);
+}
+
+#[test]
+fn process_batch_rejects_version_mutation_mid_batch() {
+    let env = Env::default();
+    let client = deploy_processor(&env);
+    let state_ver_key = soroban_sdk::symbol_short!("B_Ver");
+
+    // First call succeeds, bumping version to 1.
+    let amounts = Vec::from_array(&env, [100u64]);
+    assert!(client.try_process_batch(&amounts).is_ok());
+
+    // Manually bump version further so the next call sees a mismatch.
+    env.as_contract(&client.address, || {
+        env.storage().instance().set(&state_ver_key, &42_u64);
+    });
+
+    let amounts = Vec::from_array(&env, [200u64]);
+    let result = client.try_process_batch(&amounts);
+    assert_eq!(result, Err(Ok(Error::StateVersionMismatch)));
+}
+
+#[test]
+fn process_batch_stale_callback_seq_does_not_block_new_calls() {
+    let env = Env::default();
+    let client = deploy_processor(&env);
+
+    // Simulate an orphaned callback sequence from a previous interrupted call.
+    let cb_seq_key = soroban_sdk::symbol_short!("B_CbSeq");
+    env.as_contract(&client.address, || {
+        env.storage().instance().set(&cb_seq_key, &999_u64);
+    });
+
+    // A new call must not be blocked by stale callback state.
+    let amounts = Vec::from_array(&env, [7u64, 8, 9]);
+    let result = client.try_process_batch(&amounts);
+    assert!(result.is_ok());
+
+    // The callback sequence should have advanced past the stale value.
+    let seq: u64 = env.as_contract(&client.address, || {
+        env.storage().instance().get(&cb_seq_key).unwrap_or(0)
+    });
+    assert_eq!(seq, 1000);
 }
