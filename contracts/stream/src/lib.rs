@@ -8,7 +8,6 @@ pub mod storage;
 #[cfg(test)]
 mod tests;
 mod ttl;
-mod yield_integration;
 
 use soroban_sdk::{contract, contractimpl, panic_with_error, token, Address, Env};
 
@@ -243,12 +242,17 @@ impl DripStream {
         info.sender.require_auth();
 
         let now = env.ledger().timestamp();
-        let paused_duration = now - info.paused_at;
+        let paused_duration = now
+            .checked_sub(info.paused_at)
+            .ok_or(Error::ArithmeticOverflow)?;
 
         // Shift start_time forward by paused duration so paused time doesn't
         // count; end_time is shifted by the same amount on resume so the
         // contracted duration is preserved in wall-clock terms.
-        let new_start: u64 = info.start_time + paused_duration;
+        let new_start: u64 = info
+            .start_time
+            .checked_add(paused_duration)
+            .ok_or(Error::ArithmeticOverflow)?;
 
         // Single consolidated save — no separate `state::set_paused()` or
         // direct `DataKey::StartTime` / `DataKey::PausedAt` writes.
@@ -257,7 +261,10 @@ impl DripStream {
         updated.flags &= !FLAG_PAUSED;
         updated.paused_at = 0;
         if info.end_time > 0 {
-            updated.end_time = info.end_time + paused_duration;
+            updated.end_time = info
+                .end_time
+                .checked_add(paused_duration)
+                .ok_or(Error::ArithmeticOverflow)?;
         }
         state::save(env, &updated);
 
