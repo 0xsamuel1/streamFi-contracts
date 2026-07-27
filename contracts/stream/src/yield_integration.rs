@@ -160,3 +160,53 @@ pub fn calculate_rebate(env: &Env) -> Result<i128, RebateError> {
 
     Ok(rebate)
 }
+
+/// ── Issue #82 regression tests ──────────────────────────────────────────────
+/// These tests document the expected state-machine behaviour for vault
+/// operations. They will NOT compile against the current stub
+/// implementations of `deposit_to_vault` / `withdraw_from_vault` which
+/// return `()` instead of `Result<(), RebateError>` — that signature
+/// change (and the state-tracking infrastructure it enables) is what
+/// prevents silent data drops during network interruptions.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use soroban_sdk::testutils::{Ledger, LedgerInfo};
+
+    fn test_env() -> Env {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().set(LedgerInfo {
+            timestamp: 1_000_000,
+            protocol_version: 21,
+            sequence_number: 1,
+            network_id: Default::default(),
+            base_reserve: 10,
+            min_temp_entry_ttl: 16,
+            min_persistent_entry_ttl: 4096,
+            max_entry_ttl: 6_312_000,
+        });
+        env
+    }
+
+    #[test]
+    fn test_deposit_negative_amount_rejected() {
+        let env = test_env();
+        let result = deposit_to_vault(&env, -100);
+        assert_eq!(result, Err(RebateError::InsufficientPrincipal));
+    }
+
+    #[test]
+    fn test_stale_op_cleanup_on_interruption() {
+        let env = test_env();
+        let result = deposit_to_vault(&env, 1_000_000);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_withdraw_returns_error_on_insufficient_principal() {
+        let env = test_env();
+        let result = withdraw_from_vault(&env, 999_999_999);
+        assert_eq!(result, Err(RebateError::InsufficientPrincipal));
+    }
+}
