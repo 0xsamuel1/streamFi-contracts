@@ -44,4 +44,6 @@ pub enum Error {
     DepositTransferFailed = 24,
     /// The deposit forward from the factory to the deployed stream did not arrive.
     StreamFundingFailed = 25,
+    /// The WASM hash provided to `upgrade_stream_wasm` is all zeros (invalid).
+    InvalidWasmHash = 26,
 }

@@ -138,6 +138,43 @@ fn rapid_repeated_calls_never_diverge_from_the_invoked_sequence() {
     }
 }
 
+// ── Issue #86: upgrade_stream_wasm input validation ─────────────────────────
+
+#[test]
+fn upgrade_stream_wasm_rejects_zero_hash() {
+    let s = Setup::new();
+    let zero_hash = BytesN::from_array(&s.env, &[0u8; 32]);
+    let result = s.client.try_upgrade_stream_wasm(&zero_hash);
+    assert_eq!(result, Err(Ok(Error::InvalidWasmHash)));
+}
+
+#[test]
+fn upgrade_stream_wasm_accepts_non_zero_hash() {
+    let s = Setup::new();
+    let valid_hash = BytesN::from_array(&s.env, &[1u8; 32]);
+    let result = s.client.try_upgrade_stream_wasm(&valid_hash);
+    assert!(result.is_ok());
+}
+
+#[test]
+fn upgrade_stream_wasm_rejects_when_paused() {
+    let s = Setup::new();
+    s.client.pause();
+    let valid_hash = BytesN::from_array(&s.env, &[2u8; 32]);
+    let result = s.client.try_upgrade_stream_wasm(&valid_hash);
+    assert_eq!(result, Err(Ok(Error::ContractPaused)));
+}
+
+#[test]
+fn upgrade_stream_wasm_accepts_after_unpause() {
+    let s = Setup::new();
+    s.client.pause();
+    s.client.unpause();
+    let valid_hash = BytesN::from_array(&s.env, &[3u8; 32]);
+    let result = s.client.try_upgrade_stream_wasm(&valid_hash);
+    assert!(result.is_ok());
+}
+
 #[test]
 fn create_stream_rejects_zero_stellar_recipient() {
     let env = base_env();
