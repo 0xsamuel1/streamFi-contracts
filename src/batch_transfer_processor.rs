@@ -26,21 +26,16 @@ const SNAPSHOT_KEY: Symbol = symbol_short!("B_Snap");
 #[contractimpl]
 impl BatchTransferProcessor {
     pub fn process_batch(env: Env, amounts: soroban_sdk::Vec<u64>) -> Result<u64, Error> {
-        let state_version = load_state_version(&env);
-
         with_guard(&env, || {
             // ── Defensive null / boundary checks (Issue #83) ─────────────
             if amounts.is_empty() {
                 return Ok(0);
             }
 
-            // Reject batches larger than the declared limit.
             if amounts.len() > 100 {
                 return Err(Error::BatchTooLarge);
             }
 
-            // Reject individual zero amounts that could trigger
-            // division-by-zero or infinite-loop edge cases downstream.
             for amount in amounts.iter() {
                 if amount == 0 {
                     return Err(Error::CalculationOverflow);
@@ -48,15 +43,15 @@ impl BatchTransferProcessor {
             }
 
             // ── State-version race-condition check (Issue #84) ──────────
-            // Snapshot the current version before processing; if a
-            // concurrent mutation bumps it mid-batch, we abort to avoid
-            // committing stale results.
-            let snapshot = state_version;
+            // Snapshot the current version under the guard so there is no
+            // TOCTOU window between reading the version and acquiring the
+            // lock. Once the snapshot is taken, any external mutation that
+            // bumps the version before we finish will be detected and abort
+            // the commit.
+            let snapshot = load_state_version(&env);
             bump_state_version(&env);
-            save_snapshot(&env, snapshot);
             let current = load_state_version(&env);
             if current != snapshot + 1 {
-                // State was mutated concurrently — clean up and abort.
                 cleanup_stale_callbacks(&env);
                 return Err(Error::StateVersionMismatch);
             }
@@ -72,15 +67,15 @@ impl BatchTransferProcessor {
                 }
             }
 
-            // Verify version hasn't drifted during iteration.
+            // Final check: version must still match the expected value.
             let final_version = load_state_version(&env);
             if final_version != snapshot + 1 {
                 cleanup_stale_callbacks(&env);
                 return Err(Error::StateVersionMismatch);
             }
 
-            // Commit a callback sequence marker so future interactions
-            // can detect and discard stale callbacks.
+            // Advance the callback sequence so stale callbacks from prior
+            // interrupted batches are invalidated.
             let cb_seq = load_callback_seq(&env);
             env.storage()
                 .instance()
