@@ -1,6 +1,6 @@
 #![no_std]
 
-use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, Env};
+use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, Env, Vec};
 
 /// Protocol administration roles for the oracle.
 ///
@@ -32,6 +32,13 @@ pub enum DataKey {
     Role(RoleKey),
     AdminCount,
     Paused,
+    /// Most recent submission from a single feeder, keyed by feeder address.
+    /// Aggregated (median) across every address in `Submitters` by
+    /// `get_twap_price`, so no single feeder's price is trusted alone.
+    Submission(Address),
+    /// Every address that has ever called `submit_price`, iterated by
+    /// `get_twap_price` to build the aggregation set.
+    Submitters,
 }
 
 #[contracttype]
@@ -130,6 +137,22 @@ impl TwapOracle {
         Ok(())
     }
 
+    /// Moves the `Admin` role from `caller` to `new_admin` atomically, so
+    /// oracle governance is never permanently stuck on a single key — see
+    /// issue #192. Equivalent to `grant_role(Admin, new_admin)` followed by
+    /// `revoke_role(Admin, caller)`, but as one call so the contract never
+    /// passes through a state where `caller` has been revoked without
+    /// `new_admin` already holding the role.
+    pub fn transfer_admin(env: Env, caller: Address, new_admin: Address) -> Result<(), Error> {
+        require_role_or_admin(&env, &caller, Role::Admin)?;
+
+        grant_role_inner(&env, Role::Admin, &new_admin);
+        revoke_role_inner(&env, Role::Admin, &caller)?;
+
+        events::admin_transferred(&env, &caller, &new_admin);
+        Ok(())
+    }
+
     // ── Reads ────────────────────────────────────────────────────────────
 
     pub fn configure_oracle(env: Env, caller: Address, config: OracleConfig) -> Result<(), Error> {
@@ -140,12 +163,16 @@ impl TwapOracle {
         }
 
         env.storage().instance().set(&DataKey::Config, &config);
+        events::oracle_configured(&env, &caller, config);
         Ok(())
     }
 
     /// Submit a price observation. Gated on `PriceFeeder` (or `Admin`).
     ///
-    /// Blocked while the oracle is under an emergency pause.
+    /// Blocked while the oracle is under an emergency pause. Each feeder's
+    /// submission is tracked independently (`DataKey::Submission`) and
+    /// aggregated by `get_twap_price` — no single feeder's price is trusted
+    /// unconditionally.
     pub fn submit_price(env: Env, caller: Address, price: u64) -> Result<(), Error> {
         if is_paused(&env) {
             return Err(Error::ContractPaused);
@@ -156,22 +183,38 @@ impl TwapOracle {
             return Err(Error::InvalidPrice);
         }
 
+        let now = env.ledger().timestamp();
         let data = PriceData {
             price,
-            updated_at: env.ledger().timestamp(),
+            updated_at: now,
         };
+
+        // Legacy single-value slot — kept so `price_age`/`is_price_stale`
+        // and any external readers of the old scalar `Price` key continue
+        // to see the most recent submission.
         env.storage().instance().set(&DataKey::Price, &data);
+
+        env.storage()
+            .instance()
+            .set(&DataKey::Submission(caller.clone()), &data);
+        add_submitter(&env, &caller);
+
+        events::price_submitted(&env, &caller, price, now);
         Ok(())
     }
 
     /// Returns the current oracle price, guarded against re-entrancy.
     ///
+    /// Aggregates every non-stale submission across all addresses that have
+    /// ever called `submit_price` (median, or the average of the two
+    /// middle values when there is an even count) rather than trusting the
+    /// single most recent submitter unconditionally — see issue #194.
+    ///
     /// Errors:
     /// - `OracleNotConfigured` if `configure_oracle` has not been called.
     /// - `NoPriceAvailable` if no price has been submitted yet.
-    /// - `OracleStalePrice` if the last submitted price is older than the
+    /// - `OracleStalePrice` if every submission on record is older than the
     ///   configured `max_staleness`.
-    /// - `InvalidPrice` if the stored price is zero.
     /// - `OracleLocked` if called while the re-entrancy guard is already held
     ///   (see the nested-lock warning on `calculate_fiat_stream_payout`).
     pub fn get_twap_price(env: Env) -> Result<u64, Error> {
@@ -182,23 +225,81 @@ impl TwapOracle {
                 .get(&DataKey::Config)
                 .ok_or(Error::OracleNotConfigured)?;
 
-            let data: PriceData = env
+            let submitters: Vec<Address> = env
                 .storage()
                 .instance()
-                .get(&DataKey::Price)
-                .ok_or(Error::NoPriceAvailable)?;
+                .get(&DataKey::Submitters)
+                .unwrap_or(Vec::new(&env));
 
-            let age = env.ledger().timestamp().saturating_sub(data.updated_at);
-            if age > config.max_staleness {
-                return Err(Error::OracleStalePrice);
+            let now = env.ledger().timestamp();
+            let mut fresh_prices: Vec<u64> = Vec::new(&env);
+            let mut saw_any_submission = false;
+
+            for feeder in submitters.iter() {
+                let submission: Option<PriceData> =
+                    env.storage().instance().get(&DataKey::Submission(feeder));
+                if let Some(data) = submission {
+                    saw_any_submission = true;
+                    let age = now.saturating_sub(data.updated_at);
+                    if age <= config.max_staleness && data.price != 0 {
+                        fresh_prices.push_back(data.price);
+                    }
+                }
             }
 
-            if data.price == 0 {
-                return Err(Error::InvalidPrice);
+            if fresh_prices.is_empty() {
+                if saw_any_submission {
+                    return Err(Error::OracleStalePrice);
+                }
+                return Err(Error::NoPriceAvailable);
             }
 
-            Ok(data.price)
+            Ok(median(fresh_prices))
         })
+    }
+
+    /// Read-only: seconds elapsed since the most recent `submit_price` call
+    /// by any feeder, without triggering `get_twap_price`'s error path.
+    ///
+    /// Errors:
+    /// - `OracleNotConfigured` if `configure_oracle` has not been called.
+    /// - `NoPriceAvailable` if no price has ever been submitted.
+    pub fn price_age(env: Env) -> Result<u64, Error> {
+        if !env.storage().instance().has(&DataKey::Config) {
+            return Err(Error::OracleNotConfigured);
+        }
+
+        let data: PriceData = env
+            .storage()
+            .instance()
+            .get(&DataKey::Price)
+            .ok_or(Error::NoPriceAvailable)?;
+
+        Ok(env.ledger().timestamp().saturating_sub(data.updated_at))
+    }
+
+    /// Read-only: whether the most recent submission is older than
+    /// `configure_oracle`'s `max_staleness`, without triggering
+    /// `get_twap_price`'s error path — see issue #195.
+    ///
+    /// Errors:
+    /// - `OracleNotConfigured` if `configure_oracle` has not been called.
+    /// - `NoPriceAvailable` if no price has ever been submitted.
+    pub fn is_price_stale(env: Env) -> Result<bool, Error> {
+        let config: OracleConfig = env
+            .storage()
+            .instance()
+            .get(&DataKey::Config)
+            .ok_or(Error::OracleNotConfigured)?;
+
+        let data: PriceData = env
+            .storage()
+            .instance()
+            .get(&DataKey::Price)
+            .ok_or(Error::NoPriceAvailable)?;
+
+        let age = env.ledger().timestamp().saturating_sub(data.updated_at);
+        Ok(age > config.max_staleness)
     }
 
     /// Converts a nominal token amount into its fiat equivalent.
@@ -338,6 +439,64 @@ fn require_role_or_admin(env: &Env, caller: &Address, role: Role) -> Result<(), 
     }
 }
 
+/// Records `account` in the `Submitters` set the first time it submits a
+/// price, so `get_twap_price` knows which `DataKey::Submission` entries to
+/// aggregate. No-op if already recorded.
+fn add_submitter(env: &Env, account: &Address) {
+    let mut submitters: Vec<Address> = env
+        .storage()
+        .instance()
+        .get(&DataKey::Submitters)
+        .unwrap_or(Vec::new(env));
+
+    for existing in submitters.iter() {
+        if existing == *account {
+            return;
+        }
+    }
+
+    submitters.push_back(account.clone());
+    env.storage()
+        .instance()
+        .set(&DataKey::Submitters, &submitters);
+}
+
+/// Median of `prices` (average of the two middle values for an even-length
+/// input). Sorts a copy in place with insertion sort — the submitter count
+/// is expected to stay small, so O(n^2) is not a concern.
+///
+/// Panics if `prices` is empty; callers must guarantee at least one value.
+fn median(prices: Vec<u64>) -> u64 {
+    let len = prices.len();
+    let mut sorted = prices.clone();
+
+    let mut i: u32 = 1;
+    while i < len {
+        let key = sorted.get(i).unwrap();
+        let mut j = i;
+        while j > 0 {
+            let prev = sorted.get(j - 1).unwrap();
+            if prev > key {
+                sorted.set(j, prev);
+                j -= 1;
+            } else {
+                break;
+            }
+        }
+        sorted.set(j, key);
+        i += 1;
+    }
+
+    let mid = len / 2;
+    if len & 1 == 0 {
+        let a = sorted.get(mid - 1).unwrap() as u128;
+        let b = sorted.get(mid).unwrap() as u128;
+        ((a + b) / 2) as u64
+    } else {
+        sorted.get(mid).unwrap()
+    }
+}
+
 fn is_paused(env: &Env) -> bool {
     env.storage()
         .instance()
@@ -400,6 +559,25 @@ mod events {
         env.events()
             .publish((symbol_short!("unpaused"), caller.clone()), resumed_at);
     }
+
+    pub fn admin_transferred(env: &Env, old_admin: &Address, new_admin: &Address) {
+        env.events().publish(
+            (symbol_short!("adm_xfer"), old_admin.clone()),
+            new_admin.clone(),
+        );
+    }
+
+    pub fn price_submitted(env: &Env, caller: &Address, price: u64, timestamp: u64) {
+        env.events().publish(
+            (symbol_short!("priced"), caller.clone()),
+            (price, timestamp),
+        );
+    }
+
+    pub fn oracle_configured(env: &Env, caller: &Address, config: super::OracleConfig) {
+        env.events()
+            .publish((symbol_short!("ocfg"), caller.clone()), config);
+    }
 }
 
 #[cfg(test)]
@@ -424,7 +602,7 @@ mod tests {
 
     #[test]
     fn initialize_sets_admin_and_grants_role() {
-        let (env, client, admin) = setup();
+        let (_env, client, admin) = setup();
         client.initialize(&admin);
         assert!(client.has_role(&Role::Admin, &admin));
         // Second init should fail
@@ -787,5 +965,271 @@ mod tests {
         // Read-only methods still work with the last committed price.
         let price = client.get_twap_price();
         assert_eq!(price, 50_000_000);
+    }
+
+    // ── Admin rotation tests (#192) ───────────────────────────────────────
+
+    #[test]
+    fn transfer_admin_moves_role_and_revokes_old() {
+        let (env, client, admin) = setup();
+        client.initialize(&admin);
+
+        let new_admin = Address::generate(&env);
+        client.transfer_admin(&admin, &new_admin);
+
+        assert!(client.has_role(&Role::Admin, &new_admin));
+        assert!(!client.has_role(&Role::Admin, &admin));
+    }
+
+    #[test]
+    fn transfer_admin_requires_admin_role() {
+        let (env, client, admin) = setup();
+        client.initialize(&admin);
+
+        let stranger = Address::generate(&env);
+        let new_admin = Address::generate(&env);
+        let result = client.try_transfer_admin(&stranger, &new_admin);
+        assert_eq!(result, Err(Ok(Error::NotAuthorized)));
+    }
+
+    #[test]
+    fn new_admin_can_act_immediately_after_transfer() {
+        let (env, client, admin) = setup();
+        client.initialize(&admin);
+
+        let new_admin = Address::generate(&env);
+        client.transfer_admin(&admin, &new_admin);
+
+        let oracle_addr = Address::generate(&env);
+        let config = OracleConfig {
+            oracle_address: oracle_addr,
+            decimals: 8,
+            asset_peg: 1,
+            max_staleness: 300,
+        };
+        // Old admin is no longer authorized...
+        let result = client.try_configure_oracle(&admin, &config);
+        assert_eq!(result, Err(Ok(Error::NotAuthorized)));
+        // ...new admin is.
+        client.configure_oracle(&new_admin, &config);
+    }
+
+    // ── Multi-feeder aggregation tests (#194) ─────────────────────────────
+
+    #[test]
+    fn get_twap_price_aggregates_median_across_feeders() {
+        let (env, client, admin) = setup();
+        client.initialize(&admin);
+
+        let oracle_addr = Address::generate(&env);
+        let config = OracleConfig {
+            oracle_address: oracle_addr,
+            decimals: 8,
+            asset_peg: 1,
+            max_staleness: 300,
+        };
+        client.configure_oracle(&admin, &config);
+
+        let feeder_b = Address::generate(&env);
+        let feeder_c = Address::generate(&env);
+        client.grant_role(&admin, &Role::PriceFeeder, &feeder_b);
+        client.grant_role(&admin, &Role::PriceFeeder, &feeder_c);
+
+        client.submit_price(&admin, &10);
+        client.submit_price(&feeder_b, &20);
+        client.submit_price(&feeder_c, &30);
+
+        // Median of [10, 20, 30] = 20.
+        let price = client.get_twap_price();
+        assert_eq!(price, 20);
+    }
+
+    #[test]
+    fn get_twap_price_averages_middle_two_on_even_count() {
+        let (env, client, admin) = setup();
+        client.initialize(&admin);
+
+        let oracle_addr = Address::generate(&env);
+        let config = OracleConfig {
+            oracle_address: oracle_addr,
+            decimals: 8,
+            asset_peg: 1,
+            max_staleness: 300,
+        };
+        client.configure_oracle(&admin, &config);
+
+        let feeder_b = Address::generate(&env);
+        client.grant_role(&admin, &Role::PriceFeeder, &feeder_b);
+
+        client.submit_price(&admin, &10);
+        client.submit_price(&feeder_b, &20);
+
+        // Even count: average of the two middle (only) values = 15.
+        let price = client.get_twap_price();
+        assert_eq!(price, 15);
+    }
+
+    #[test]
+    fn get_twap_price_ignores_stale_submitters_in_aggregate() {
+        let (env, client, admin) = setup();
+        client.initialize(&admin);
+
+        let oracle_addr = Address::generate(&env);
+        let config = OracleConfig {
+            oracle_address: oracle_addr,
+            decimals: 8,
+            asset_peg: 1,
+            max_staleness: 60,
+        };
+        client.configure_oracle(&admin, &config);
+
+        let feeder_b = Address::generate(&env);
+        client.grant_role(&admin, &Role::PriceFeeder, &feeder_b);
+
+        client.submit_price(&admin, &10);
+        let submitted_at = env.ledger().timestamp();
+
+        // Advance time so admin's submission goes stale.
+        env.ledger().set(LedgerInfo {
+            timestamp: submitted_at + 61,
+            protocol_version: 21,
+            sequence_number: 1,
+            network_id: Default::default(),
+            base_reserve: 10,
+            min_temp_entry_ttl: 16,
+            min_persistent_entry_ttl: 4096,
+            max_entry_ttl: 6_312_000,
+        });
+
+        // feeder_b submits fresh after the jump.
+        client.submit_price(&feeder_b, &20);
+
+        // Only feeder_b's fresh submission counts toward the aggregate.
+        let price = client.get_twap_price();
+        assert_eq!(price, 20);
+    }
+
+    #[test]
+    fn get_twap_price_errors_stale_when_all_submitters_stale() {
+        let (env, client, admin) = setup();
+        client.initialize(&admin);
+
+        let oracle_addr = Address::generate(&env);
+        let config = OracleConfig {
+            oracle_address: oracle_addr,
+            decimals: 8,
+            asset_peg: 1,
+            max_staleness: 60,
+        };
+        client.configure_oracle(&admin, &config);
+
+        client.submit_price(&admin, &10);
+        let submitted_at = env.ledger().timestamp();
+
+        env.ledger().set(LedgerInfo {
+            timestamp: submitted_at + 61,
+            protocol_version: 21,
+            sequence_number: 1,
+            network_id: Default::default(),
+            base_reserve: 10,
+            min_temp_entry_ttl: 16,
+            min_persistent_entry_ttl: 4096,
+            max_entry_ttl: 6_312_000,
+        });
+
+        let result = client.try_get_twap_price();
+        assert_eq!(result, Err(Ok(Error::OracleStalePrice)));
+    }
+
+    // ── Staleness introspection tests (#195) ──────────────────────────────
+
+    #[test]
+    fn price_age_reports_seconds_since_last_submission() {
+        let (env, client, admin) = setup();
+        client.initialize(&admin);
+
+        let oracle_addr = Address::generate(&env);
+        let config = OracleConfig {
+            oracle_address: oracle_addr,
+            decimals: 8,
+            asset_peg: 1,
+            max_staleness: 300,
+        };
+        client.configure_oracle(&admin, &config);
+        client.submit_price(&admin, &50_000_000);
+        let submitted_at = env.ledger().timestamp();
+
+        assert_eq!(client.price_age(), 0);
+
+        env.ledger().set(LedgerInfo {
+            timestamp: submitted_at + 42,
+            protocol_version: 21,
+            sequence_number: 1,
+            network_id: Default::default(),
+            base_reserve: 10,
+            min_temp_entry_ttl: 16,
+            min_persistent_entry_ttl: 4096,
+            max_entry_ttl: 6_312_000,
+        });
+
+        assert_eq!(client.price_age(), 42);
+    }
+
+    #[test]
+    fn price_age_requires_config() {
+        let (_env, client, _admin) = setup();
+        let result = client.try_price_age();
+        assert_eq!(result, Err(Ok(Error::OracleNotConfigured)));
+    }
+
+    #[test]
+    fn price_age_requires_price_submission() {
+        let (env, client, admin) = setup();
+        client.initialize(&admin);
+
+        let oracle_addr = Address::generate(&env);
+        let config = OracleConfig {
+            oracle_address: oracle_addr,
+            decimals: 8,
+            asset_peg: 1,
+            max_staleness: 300,
+        };
+        client.configure_oracle(&admin, &config);
+
+        let result = client.try_price_age();
+        assert_eq!(result, Err(Ok(Error::NoPriceAvailable)));
+    }
+
+    #[test]
+    fn is_price_stale_reflects_max_staleness_without_erroring() {
+        let (env, client, admin) = setup();
+        client.initialize(&admin);
+
+        let oracle_addr = Address::generate(&env);
+        let config = OracleConfig {
+            oracle_address: oracle_addr,
+            decimals: 8,
+            asset_peg: 1,
+            max_staleness: 60,
+        };
+        client.configure_oracle(&admin, &config);
+        client.submit_price(&admin, &50_000_000);
+        let submitted_at = env.ledger().timestamp();
+
+        assert!(!client.is_price_stale());
+
+        env.ledger().set(LedgerInfo {
+            timestamp: submitted_at + 61,
+            protocol_version: 21,
+            sequence_number: 1,
+            network_id: Default::default(),
+            base_reserve: 10,
+            min_temp_entry_ttl: 16,
+            min_persistent_entry_ttl: 4096,
+            max_entry_ttl: 6_312_000,
+        });
+
+        // Reports true instead of erroring like get_twap_price would.
+        assert!(client.is_price_stale());
     }
 }
