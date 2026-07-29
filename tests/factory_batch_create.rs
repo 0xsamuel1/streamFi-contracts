@@ -154,7 +154,7 @@ fn create_batch_streams_reverts_when_all_requests_invalid() {
     let result = client.try_create_batch_streams(&sender, &requests, &false);
     assert_eq!(result, Err(Ok(Error::InvalidDeposit)));
     assert_eq!(client.stream_count(), 0);
-    assert_eq!(client.stream_address(0), None);
+    assert_eq!(client.stream_address(&0), None);
     assert_eq!(client.stream_count_by_sender(&sender), 0);
     assert_eq!(client.stream_count_by_recipient(&recipient), 0);
 }
