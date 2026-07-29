@@ -336,6 +336,41 @@ impl DripFactory {
             .get(&DataKey::StreamAddr(stream_id))
     }
 
+    /// Cancel multiple streams in one transaction, all authorized by the
+    /// same `sender`.
+    ///
+    /// Mirrors the bulk-creation ergonomics of [`create_batch_streams`](Self::create_batch_streams)
+    /// on the cancellation side. Each stream address in `stream_addresses`
+    /// is cancelled via a cross-contract call to `DripStream::cancel`,
+    /// reusing the per-stream validation, settlement, and event emission.
+    ///
+    /// Atomicity: Soroban transactions are all-or-nothing at the host
+    /// level. If any cancellation fails (e.g. stream already cancelled,
+    /// sender mismatch), the `?` below propagates that error immediately,
+    /// and every state change already made earlier in this same call is
+    /// rolled back by the host — no partial-batch state is ever left behind.
+    pub fn cancel_batch_streams(
+        env: Env,
+        sender: Address,
+        stream_addresses: Vec<Address>,
+    ) -> Result<(), Error> {
+        sender.require_auth();
+
+        if stream_addresses.is_empty() {
+            return Err(Error::EmptyBatch);
+        }
+        if stream_addresses.len() > MAX_BATCH_SIZE {
+            return Err(Error::BatchTooLarge);
+        }
+
+        for stream_addr in stream_addresses.iter() {
+            let stream_client = drip_stream::DripStreamClient::new(&env, &stream_addr);
+            stream_client.cancel(&sender);
+        }
+
+        Ok(())
+    }
+
     /// Batch-resolve stream IDs to their deployed contract addresses.
     ///
     /// Pairs with `streams_by_sender`/`streams_by_recipient`: a page of IDs
@@ -370,6 +405,12 @@ impl DripFactory {
         query::paginate(&env, all, offset, limit)
     }
 
+    /// Paginated list of stream IDs where `recipient` is the beneficiary.
+    ///
+    /// Returns at most `limit` IDs starting at `offset`. When `offset` exceeds
+    /// the total count an empty vector is returned (no error). `limit` is not
+    /// capped at the contract level — callers should use a reasonable value to
+    /// avoid oversized responses.
     pub fn streams_by_recipient(env: Env, recipient: Address, offset: u32, limit: u32) -> Vec<u64> {
         let all: Vec<u64> = env
             .storage()

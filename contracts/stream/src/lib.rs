@@ -399,6 +399,73 @@ impl DripStream {
         Ok(())
     }
 
+    /// Sender (or operator) tops up and extends the stream in a single call.
+    ///
+    /// Combines [`top_up`](Self::top_up) and [`extend_duration`](Self::extend_duration)
+    /// into one authorized transaction, reducing round-trips and the risk of a
+    /// sender performing only one half of the pair (which would leave the
+    /// stream either underfunded for the extended duration or with idle funds
+    /// past the original `end_time`).
+    ///
+    /// `amount` is deposited into the stream and `extra_time_seconds` is added
+    /// to `end_time`. Both must be non-zero. Open-ended streams (`end_time == 0`)
+    /// cannot be extended — use `top_up` alone instead.
+    pub fn top_up_and_extend(
+        env: Env,
+        caller: Address,
+        amount: i128,
+        extra_time_seconds: u64,
+    ) -> Result<(), Error> {
+        state::with_guard(&env, |env| {
+            Self::_top_up_and_extend(env, &caller, amount, extra_time_seconds)
+        })
+    }
+
+    fn _top_up_and_extend(
+        env: &Env,
+        caller: &Address,
+        amount: i128,
+        extra_time_seconds: u64,
+    ) -> Result<(), Error> {
+        if amount <= 0 {
+            return Err(Error::InvalidAmount);
+        }
+        if extra_time_seconds == 0 {
+            return Err(Error::InvalidTimeRange);
+        }
+
+        let info = state::load(env);
+        require_sender_or_operator(env, caller, &info.sender)?;
+
+        ttl::bump(env);
+        state::assert_not_cancelled(&info)?;
+
+        if info.end_time == 0 {
+            return Err(Error::InvalidTimeRange);
+        }
+
+        let tk = token::Client::new(env, &info.token);
+        let contract_addr = env.current_contract_address();
+
+        // Transfer funds from sender into the contract
+        tk.transfer(&info.sender, &contract_addr, &amount);
+
+        // Update end_time with overflow check
+        let new_end_time = info
+            .end_time
+            .checked_add(extra_time_seconds)
+            .ok_or(Error::ArithmeticOverflow)?;
+
+        let mut updated = info.clone();
+        updated.end_time = new_end_time;
+        state::save(env, &updated);
+
+        let new_balance = tk.balance(&contract_addr);
+        events::topped_up(env, caller, amount, new_balance);
+
+        Ok(())
+    }
+
     /// Sender reclaims unstreamed tokens (only if clawback was enabled).
     pub fn clawback(env: Env, caller: Address) -> Result<i128, Error> {
         state::with_guard(&env, |env| Self::_clawback(env, &caller))

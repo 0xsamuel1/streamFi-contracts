@@ -218,3 +218,27 @@ fn bump_persistent_extends_ttl_of_persistent_entry() {
         assert_eq!(retrieved, dummy);
     });
 }
+
+// ── Issue #204: cancel_batch_streams ─────────────────────────────────────────
+
+#[test]
+fn cancel_batch_rejects_empty_list() {
+    let s = Setup::new();
+    let sender = Address::generate(&s.env);
+    let addresses: soroban_sdk::Vec<Address> = soroban_sdk::Vec::new(&s.env);
+
+    let result = s.client.try_cancel_batch_streams(&sender, &addresses);
+    assert_eq!(result, Err(Ok(Error::EmptyBatch)));
+}
+
+#[test]
+fn cancel_batch_rejects_oversized_list() {
+    let s = Setup::new();
+    let sender = Address::generate(&s.env);
+    let mut addresses: soroban_sdk::Vec<Address> = soroban_sdk::Vec::new(&s.env);
+    for _ in 0..101 {
+        addresses.push_back(Address::generate(&s.env));
+    }
+    let result = s.client.try_cancel_batch_streams(&sender, &addresses);
+    assert_eq!(result, Err(Ok(Error::BatchTooLarge)));
+}
