@@ -171,6 +171,17 @@ impl TwapOracle {
 
     // ── Reads ────────────────────────────────────────────────────────────
 
+    /// Reconfigure the oracle parameters. Admin-gated.
+    ///
+    /// When `decimals` or `asset_peg` changes relative to the currently stored
+    /// config, all existing price data (`DataKey::Price`, per-feeder
+    /// `DataKey::Submission` entries, and the `DataKey::Submitters` list) is
+    /// cleared. This prevents stale prices submitted under the old config from
+    /// being silently misinterpreted under the new parameters — the next
+    /// `get_twap_price` call will return `NoPriceAvailable` until a fresh
+    /// `submit_price` is made. Changes to `max_staleness` or `oracle_address`
+    /// alone do not clear price data, as those do not affect price magnitude
+    /// interpretation.
     pub fn configure_oracle(env: Env, caller: Address, config: OracleConfig) -> Result<(), Error> {
         require_role_or_admin(&env, &caller, Role::Admin)?;
 
@@ -179,6 +190,30 @@ impl TwapOracle {
         }
 
         bump_instance(&env);
+
+        // Check if decimals or asset_peg changed relative to existing config.
+        // If so, clear all stored price data to prevent magnitude misinterpretation.
+        let existing: Option<OracleConfig> = env.storage().instance().get(&DataKey::Config);
+        if let Some(old) = existing {
+            if old.decimals != config.decimals || old.asset_peg != config.asset_peg {
+                // Clear the legacy single-value price slot.
+                env.storage().instance().remove(&DataKey::Price);
+
+                // Clear every per-feeder submission and the submitter list itself.
+                let submitters: Vec<Address> = env
+                    .storage()
+                    .instance()
+                    .get(&DataKey::Submitters)
+                    .unwrap_or(Vec::new(&env));
+                for feeder in submitters.iter() {
+                    env.storage()
+                        .instance()
+                        .remove(&DataKey::Submission(feeder));
+                }
+                env.storage().instance().remove(&DataKey::Submitters);
+            }
+        }
+
         env.storage().instance().set(&DataKey::Config, &config);
         events::oracle_configured(&env, &caller, config);
         Ok(())
@@ -1312,5 +1347,104 @@ mod tests {
         let ttl = env
             .as_contract(&client.address, || env.storage().instance().get_ttl());
         assert!(ttl >= 100_000, "instance TTL after submit_price: {ttl}");
+    }
+
+    // ── Issue #206: configure_oracle clears stale price on decimals change ────
+
+    #[test]
+    fn configure_oracle_clears_price_when_decimals_change() {
+        let (env, client, admin) = setup();
+        client.initialize(&admin);
+
+        let oracle_addr = Address::generate(&env);
+        let config = OracleConfig {
+            oracle_address: oracle_addr.clone(),
+            decimals: 8,
+            asset_peg: 1,
+            max_staleness: 300,
+        };
+        client.configure_oracle(&admin, &config);
+        client.submit_price(&admin, &50_000_000);
+
+        // Price exists and is fresh
+        let price = client.get_twap_price();
+        assert_eq!(price, 50_000_000);
+
+        // Reconfigure with different decimals
+        let new_config = OracleConfig {
+            oracle_address: oracle_addr.clone(),
+            decimals: 6,
+            asset_peg: 1,
+            max_staleness: 300,
+        };
+        client.configure_oracle(&admin, &new_config);
+
+        // After decimals change, old price data should be cleared
+        let result = client.try_get_twap_price();
+        assert_eq!(result, Err(Ok(Error::NoPriceAvailable)));
+    }
+
+    #[test]
+    fn configure_oracle_clears_price_when_asset_peg_changes() {
+        let (env, client, admin) = setup();
+        client.initialize(&admin);
+
+        let oracle_addr = Address::generate(&env);
+        let config = OracleConfig {
+            oracle_address: oracle_addr.clone(),
+            decimals: 8,
+            asset_peg: 1,
+            max_staleness: 300,
+        };
+        client.configure_oracle(&admin, &config);
+        client.submit_price(&admin, &50_000_000);
+
+        let price = client.get_twap_price();
+        assert_eq!(price, 50_000_000);
+
+        // Reconfigure with different asset_peg
+        let new_config = OracleConfig {
+            oracle_address: oracle_addr.clone(),
+            decimals: 8,
+            asset_peg: 2,
+            max_staleness: 300,
+        };
+        client.configure_oracle(&admin, &new_config);
+
+        // After asset_peg change, old price data should be cleared
+        let result = client.try_get_twap_price();
+        assert_eq!(result, Err(Ok(Error::NoPriceAvailable)));
+    }
+
+    #[test]
+    fn configure_oracle_preserves_price_when_only_staleness_changes() {
+        let (env, client, admin) = setup();
+        client.initialize(&admin);
+
+        let oracle_addr = Address::generate(&env);
+        let config = OracleConfig {
+            oracle_address: oracle_addr.clone(),
+            decimals: 8,
+            asset_peg: 1,
+            max_staleness: 300,
+        };
+        client.configure_oracle(&admin, &config);
+        client.submit_price(&admin, &50_000_000);
+
+        let price = client.get_twap_price();
+        assert_eq!(price, 50_000_000);
+
+        // Reconfigure with only max_staleness changed
+        let new_config = OracleConfig {
+            oracle_address: oracle_addr.clone(),
+            decimals: 8,
+            asset_peg: 1,
+            max_staleness: 600,
+        };
+        client.configure_oracle(&admin, &new_config);
+
+        // Price should still be available — only staleness window changed
+        let price_after = client.get_twap_price();
+        assert_eq!(price_after, 50_000_000);
     }
 }

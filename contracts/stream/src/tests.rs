@@ -985,3 +985,69 @@ fn cancelled_flag_is_durable_across_invocations() {
     assert_eq!(s.client.withdrawable(), 0);
     assert_eq!(s.client.streamed_total(), 0);
 }
+
+// ── Issue #205: top_up_and_extend convenience ────────────────────────────────
+
+#[test]
+fn top_up_and_extend_updates_balance_and_end_time() {
+    let s = Setup::new(100, 3_600, false);
+    let before_end = s.client.info().end_time;
+
+    // Mint exact deposit needed: 100 rate × 200s = 20_000
+    let token_admin = token::StellarAssetClient::new(&s.env, &s.token.address);
+    token_admin.mint(&s.sender, &20_000);
+
+    let contract_before = s.token.balance(&s.client.address);
+    s.client.top_up_and_extend(&s.sender, &20_000, &200);
+
+    assert_eq!(s.client.info().end_time, before_end + 200);
+    assert_eq!(s.token.balance(&s.client.address), contract_before + 20_000);
+}
+
+#[test]
+fn top_up_and_extend_rejects_zero_amount() {
+    let s = Setup::new(100, 3_600, false);
+    let result = s.client.try_top_up_and_extend(&s.sender, &0, &100);
+    assert_eq!(result, Err(Ok(Error::InvalidAmount)));
+}
+
+#[test]
+fn top_up_and_extend_rejects_zero_extra_time() {
+    let s = Setup::new(100, 3_600, false);
+    let result = s.client.try_top_up_and_extend(&s.sender, &10_000, &0);
+    assert_eq!(result, Err(Ok(Error::InvalidTimeRange)));
+}
+
+#[test]
+fn top_up_and_extend_rejected_on_cancelled_stream() {
+    let s = Setup::new(100, 3_600, false);
+    s.client.cancel(&s.sender);
+
+    let token_admin = token::StellarAssetClient::new(&s.env, &s.token.address);
+    token_admin.mint(&s.sender, &10_000);
+
+    let result = s.client.try_top_up_and_extend(&s.sender, &10_000, &100);
+    assert!(result.is_err());
+}
+
+#[test]
+fn top_up_and_extend_rejected_for_open_ended_stream() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token_addr = env
+        .register_stellar_asset_contract_v2(token_admin.clone())
+        .address();
+
+    let now: u64 = 1_000_000;
+    let stream_id = env.register_contract(None, DripStream);
+    let client = DripStreamClient::new(&env, &stream_id);
+
+    client.initialize(&sender, &recipient, &token_addr, &100, &now, &0, &false);
+
+    let result = client.try_top_up_and_extend(&sender, &10_000, &100);
+    assert_eq!(result, Err(Ok(Error::InvalidTimeRange)));
+}

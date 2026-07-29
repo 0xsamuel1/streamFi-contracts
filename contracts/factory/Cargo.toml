@@ -11,6 +11,7 @@ crate-type = ["cdylib", "rlib"]
 soroban-sdk = { workspace = true }
 drip-governor = { path = "../governor" }
 drip-common = { path = "../common" }
+drip-stream = { path = "../stream" }
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
