@@ -19,11 +19,15 @@ export const WalletConnection: React.FC = () => {
   const [validationErrors, setValidationErrors] = useState<string[]>([]);
   const client = useApolloClient();
 
-  const validateCurrentInputs = () => {
+  // Accepts the field that just changed as an override, since the input's
+  // onChange fires before the corresponding setState has been applied —
+  // reading from the closed-over recipient/amount/ratePerSecond state here
+  // would validate against the value from before this keystroke.
+  const validateCurrentInputs = (overrides: Partial<{ recipient: string; amount: string; ratePerSecond: string }> = {}) => {
     const result = validateStreamPayload({
-      recipient,
-      amount: Number(amount),
-      ratePerSecond: Number(ratePerSecond),
+      recipient: overrides.recipient ?? recipient,
+      amount: Number(overrides.amount ?? amount),
+      ratePerSecond: Number(overrides.ratePerSecond ?? ratePerSecond),
     });
     setValidationErrors(result.errors);
   };
@@ -74,17 +78,17 @@ export const WalletConnection: React.FC = () => {
 
       <label>
         Recipient address
-        <input value={recipient} onChange={(e) => { setRecipient(e.target.value); validateCurrentInputs(); }} />
+        <input value={recipient} onChange={(e) => { setRecipient(e.target.value); validateCurrentInputs({ recipient: e.target.value }); }} />
       </label>
 
       <label>
         Amount
-        <input value={amount} onChange={(e) => { setAmount(e.target.value); validateCurrentInputs(); }} />
+        <input value={amount} onChange={(e) => { setAmount(e.target.value); validateCurrentInputs({ amount: e.target.value }); }} />
       </label>
 
       <label>
         Rate per second
-        <input value={ratePerSecond} onChange={(e) => { setRatePerSecond(e.target.value); validateCurrentInputs(); }} />
+        <input value={ratePerSecond} onChange={(e) => { setRatePerSecond(e.target.value); validateCurrentInputs({ ratePerSecond: e.target.value }); }} />
       </label>
 
       {validationErrors.length > 0 && (

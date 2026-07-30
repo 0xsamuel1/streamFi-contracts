@@ -7,10 +7,13 @@ interface PresetToken {
   address: string;
 }
 
-const PRESET_TOKENS: PresetToken[] = [
-  { label: 'USDC', address: 'CDLZFC3SYJYDZT7K3VJXUSJIIE5B6THFDLRLCKOS2I4CJ7D6N4J6P7' },
-  { label: 'XLM', address: 'CAS3FHW5CJ7RKKKJ6W6C5H4K5G6H7J8K9L0M1N2B3V4C5X6Y7Z8A9B0C' },
-];
+// TODO: these placeholder addresses are neither the right length nor a
+// verified USDC/XLM Soroban contract ID for any network — shipping a
+// financial token selector with an unverified address is unsafe, so the
+// preset list is empty until a maintainer supplies real, verified contract
+// IDs. Until then, users always go through the validated "custom address"
+// path below.
+const PRESET_TOKENS: PresetToken[] = [];
 
 export interface TokenSelectorHandle {
   validate: () => boolean;
@@ -65,8 +68,7 @@ export const TokenSelector = forwardRef<TokenSelectorHandle, TokenSelectorProps>
       setSelectedPreset(value);
       const isOtherOption = value === '__other__';
       setMode(isOtherOption ? 'custom' : 'preset');
-      if (!isOtherOption) {
-        setValidationErrors([]);
+      if (!isOtherOption && validateToken(value)) {
         onTokenSelected(value);
       }
     };
