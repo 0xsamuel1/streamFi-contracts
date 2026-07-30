@@ -4,8 +4,8 @@ extern crate std;
 
 use soroban_sdk::{testutils::Address as _, token, Address, Env};
 
-use crate::TokenVaultClient;
 use crate::storage;
+use crate::TokenVaultClient;
 
 struct Setup {
     env: Env,
@@ -91,7 +91,10 @@ fn deposit_succeeds_with_real_sender_auth() {
     // mock_all_auths() satisfies `from.require_auth()` here -- this is the
     // control case proving the happy path still works once auth is enforced.
     s.client.deposit(&s.user, &999_900);
-    assert_eq!(s.client.try_deposit(&s.user, &200), Err(Ok(super::errors::Error::LimitExceeded)));
+    assert_eq!(
+        s.client.try_deposit(&s.user, &200),
+        Err(Ok(super::errors::Error::LimitExceeded))
+    );
 }
 
 #[test]
@@ -124,7 +127,14 @@ fn withdraw_succeeds_with_real_owner_auth() {
 // check -- each test isolates only the one `require_auth()` call it cares
 // about, which must panic since no matching authorization was ever provided.
 
-fn seed_vault(env: &Env, vault_id: &Address, owner: &Address, token_addr: &Address, balance: i128, max_limit: i128) {
+fn seed_vault(
+    env: &Env,
+    vault_id: &Address,
+    owner: &Address,
+    token_addr: &Address,
+    balance: i128,
+    max_limit: i128,
+) {
     env.as_contract(vault_id, || {
         storage::set_owner(env, owner);
         storage::set_token(env, token_addr);

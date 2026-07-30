@@ -7,7 +7,10 @@ mod tests;
 
 use errors::Error;
 use soroban_sdk::{contract, contractimpl, panic_with_error, token, Address, Env};
-use storage::{get_balance, get_max_limit, get_pending, get_token, get_owner, set_balance, set_max_limit, set_owner, set_pending, set_token};
+use storage::{
+    get_balance, get_max_limit, get_owner, get_pending, get_token, set_balance, set_max_limit,
+    set_owner, set_pending, set_token,
+};
 
 #[contract]
 pub struct TokenVault;
@@ -45,7 +48,9 @@ impl TokenVault {
         let balance = get_balance(&env).unwrap_or(0_i128);
         let max = get_max_limit(&env).ok_or(Error::ArithmeticOverflow)?;
 
-        let new_balance = balance.checked_add(amount).ok_or(Error::ArithmeticOverflow)?;
+        let new_balance = balance
+            .checked_add(amount)
+            .ok_or(Error::ArithmeticOverflow)?;
         if new_balance > max {
             return Err(Error::LimitExceeded);
         }
@@ -71,7 +76,9 @@ impl TokenVault {
         Self::cleanup_pending(&env);
 
         let balance = get_balance(&env).unwrap_or(0_i128);
-        let new_balance = balance.checked_sub(amount).ok_or(Error::ArithmeticOverflow)?;
+        let new_balance = balance
+            .checked_sub(amount)
+            .ok_or(Error::ArithmeticOverflow)?;
 
         let tk = token::Client::new(&env, &get_token(&env).ok_or(Error::ArithmeticOverflow)?);
         tk.transfer(&env.current_contract_address(), &to, &amount);
