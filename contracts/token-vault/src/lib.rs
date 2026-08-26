@@ -53,7 +53,7 @@ impl TokenVault {
         }
 
         if get_owner(&env).is_some() {
-            panic_with_error!(&env, Error::NotAuthorized);
+            panic_with_error!(&env, Error::AlreadyInitialized);
         }
 
         set_owner(&env, &owner);
@@ -76,10 +76,10 @@ impl TokenVault {
         // Cleanup any pending callbacks before state mutation
         Self::cleanup_pending(&env);
 
-        let owner = get_owner(&env).ok_or(Error::NotAuthorized)?;
+        let _owner = get_owner(&env).ok_or(Error::NotInitialized)?;
         // Check current balance and max_limit safely
         let balance = get_balance(&env).unwrap_or(0_i128);
-        let max = get_max_limit(&env).ok_or(Error::ArithmeticOverflow)?;
+        let max = get_max_limit(&env).ok_or(Error::NotInitialized)?;
 
         let new_balance = balance
             .checked_add(amount)
@@ -89,7 +89,7 @@ impl TokenVault {
         }
 
         // perform token transfer
-        let tk = token::Client::new(&env, &get_token(&env).ok_or(Error::ArithmeticOverflow)?);
+        let tk = token::Client::new(&env, &get_token(&env).ok_or(Error::NotInitialized)?);
         tk.transfer(&from, &env.current_contract_address(), &amount);
 
         set_balance(&env, &new_balance);
@@ -102,7 +102,7 @@ impl TokenVault {
 
     pub fn withdraw(env: Env, caller: Address, to: Address, amount: i128) -> Result<(), Error> {
         assert_not_paused(&env)?;
-        let owner = get_owner(&env).ok_or(Error::NotAuthorized)?;
+        let owner = get_owner(&env).ok_or(Error::NotInitialized)?;
         require_owner_or_operator(&env, &caller, &owner)?;
 
         if amount <= 0 {
@@ -115,7 +115,7 @@ impl TokenVault {
             .checked_sub(amount)
             .ok_or(Error::ArithmeticOverflow)?;
 
-        let tk = token::Client::new(&env, &get_token(&env).ok_or(Error::ArithmeticOverflow)?);
+        let tk = token::Client::new(&env, &get_token(&env).ok_or(Error::NotInitialized)?);
         tk.transfer(&env.current_contract_address(), &to, &amount);
 
         set_balance(&env, &new_balance);
@@ -126,7 +126,7 @@ impl TokenVault {
 
     pub fn set_limit(env: Env, caller: Address, new_limit: i128) -> Result<(), Error> {
         assert_not_paused(&env)?;
-        let owner = get_owner(&env).ok_or(Error::NotAuthorized)?;
+        let owner = get_owner(&env).ok_or(Error::NotInitialized)?;
         require_owner_or_operator(&env, &caller, &owner)?;
 
         if new_limit <= 0 {
@@ -151,7 +151,7 @@ impl TokenVault {
     /// owner can delegate day-to-day operations to a hot wallet while keeping
     /// the owner key in cold storage.
     pub fn set_operator(env: Env, caller: Address, operator: Address) -> Result<(), Error> {
-        let owner = get_owner(&env).ok_or(Error::NotAuthorized)?;
+        let owner = get_owner(&env).ok_or(Error::NotInitialized)?;
         if caller != owner {
             return Err(Error::NotAuthorized);
         }
@@ -165,7 +165,7 @@ impl TokenVault {
     ///
     /// No-op (not an error) if no operator is currently set.
     pub fn revoke_operator(env: Env, caller: Address) -> Result<(), Error> {
-        let owner = get_owner(&env).ok_or(Error::NotAuthorized)?;
+        let owner = get_owner(&env).ok_or(Error::NotInitialized)?;
         if caller != owner {
             return Err(Error::NotAuthorized);
         }
@@ -189,7 +189,7 @@ impl TokenVault {
     /// `pause`/`unpause`/`is_paused` triple present on `DripFactory`,
     /// `DripGovernor`, and `TwapOracle`.
     pub fn pause(env: Env, caller: Address) -> Result<(), Error> {
-        let owner = get_owner(&env).ok_or(Error::NotAuthorized)?;
+        let owner = get_owner(&env).ok_or(Error::NotInitialized)?;
         if caller != owner {
             return Err(Error::NotAuthorized);
         }
@@ -204,7 +204,7 @@ impl TokenVault {
 
     /// Lift the emergency pause, re-enabling all state-mutating operations.
     pub fn unpause(env: Env, caller: Address) -> Result<(), Error> {
-        let owner = get_owner(&env).ok_or(Error::NotAuthorized)?;
+        let owner = get_owner(&env).ok_or(Error::NotInitialized)?;
         if caller != owner {
             return Err(Error::NotAuthorized);
         }

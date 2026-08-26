@@ -120,6 +120,8 @@ pub enum Error {
     NotPaused = 1013,
     /// Refused to revoke the last `Admin`, which would freeze oracle governance.
     LastAdmin = 1014,
+    /// `max_staleness` was set to 0 (degenerate: causes all price submissions to be immediately stale).
+    InvalidMaxStaleness = 1015,
 }
 
 #[contract]
@@ -254,6 +256,10 @@ impl TwapOracle {
 
         if config.decimals > 38 {
             return Err(Error::InvalidDecimals);
+        }
+
+        if config.max_staleness == 0 {
+            return Err(Error::InvalidMaxStaleness);
         }
 
         bump_instance(&env);
@@ -815,6 +821,22 @@ mod tests {
         };
         let result = client.try_configure_oracle(&admin, &config);
         assert_eq!(result, Err(Ok(Error::InvalidDecimals)));
+    }
+
+    #[test]
+    fn configure_oracle_rejects_zero_max_staleness() {
+        let (env, client, admin) = setup();
+        client.initialize(&admin);
+
+        let oracle_addr = Address::generate(&env);
+        let config = OracleConfig {
+            oracle_address: oracle_addr,
+            decimals: 8,
+            asset_peg: 1,
+            max_staleness: 0,
+        };
+        let result = client.try_configure_oracle(&admin, &config);
+        assert_eq!(result, Err(Ok(Error::InvalidMaxStaleness)));
     }
 
     #[test]
