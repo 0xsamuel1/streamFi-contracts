@@ -56,6 +56,7 @@ fn assert_not_paused(env: &Env) -> Result<(), Error> {
 pub struct DripGovernor;
 
 #[contractimpl]
+#[allow(deprecated)]
 impl DripGovernor {
     /// Deploy-time initialisation.
     ///
@@ -295,6 +296,9 @@ impl DripGovernor {
     ///
     /// **Deprecated**: Use `propose_authority` + `accept_authority` instead for
     /// the safer 2-step transfer pattern (Ownable2Step).
+    #[deprecated(
+        note = "Use `propose_authority` + `accept_authority` instead for the safer 2-step transfer pattern (Ownable2Step)."
+    )]
     pub fn transfer_authority(
         env: Env,
         caller: Address,
