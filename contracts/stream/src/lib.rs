@@ -247,6 +247,9 @@ impl DripStream {
         require_sender_or_operator(env, caller, &info.sender)?;
 
         let now = env.ledger().timestamp();
+        if now < info.start_time {
+            return Err(Error::StreamNotStarted);
+        }
         let w = math::withdrawable(env, &info)?;
 
         // Single consolidated save — no separate `state::set_paused()` call
@@ -607,6 +610,13 @@ impl DripStream {
         }
         caller.require_auth();
         ttl::bump(&env);
+
+        if let Some(existing) = env.storage().instance().get::<_, Address>(&DataKey::Operator) {
+            if existing != operator {
+                return Err(Error::OperatorAlreadySet);
+            }
+            return Ok(());
+        }
 
         env.storage().instance().set(&DataKey::Operator, &operator);
         events::operator_set(&env, &caller, &operator);
