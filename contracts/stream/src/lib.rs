@@ -215,6 +215,10 @@ impl DripStream {
         // is still the correct ordering for state-machine correctness).
         let mut cancelled_info = info.clone();
         cancelled_info.flags |= FLAG_CANCELLED;
+        cancelled_info.withdrawn = info
+            .withdrawn
+            .checked_add(owed_to_recipient)
+            .ok_or(Error::ArithmeticOverflow)?;
         state::save(env, &cancelled_info);
 
         // Pay the recipient their earned-but-unwithdrawn portion.
