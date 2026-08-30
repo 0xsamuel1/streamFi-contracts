@@ -179,6 +179,22 @@ pub enum DataKey {
     /// Value: `Vec<u64>` — up to `query::MAX_PAGE_SIZE` stream IDs in creation order
     ByRecipientPage(Address, u32),
 
+    /// **Persistent storage.** Number of legacy sender entries already copied
+    /// into paged storage during an incremental migration.
+    BySenderMigrationCursor(Address),
+
+    /// **Persistent storage.** Original sender legacy-index length captured
+    /// when incremental migration starts.
+    BySenderLegacyCount(Address),
+
+    /// **Persistent storage.** Number of legacy recipient entries already copied
+    /// into paged storage during an incremental migration.
+    ByRecipientMigrationCursor(Address),
+
+    /// **Persistent storage.** Original recipient legacy-index length captured
+    /// when incremental migration starts.
+    ByRecipientLegacyCount(Address),
+
     /// **Persistent storage.** Total number of sender-indexed streams.
     /// Key: `DataKey::BySenderCount(Address)` — sender address
     /// Value: `u32` — total count used to derive page boundaries
