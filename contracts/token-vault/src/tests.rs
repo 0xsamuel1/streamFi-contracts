@@ -109,6 +109,32 @@ fn withdraw_succeeds_with_real_owner_auth() {
     assert_eq!(s.token.balance(&recipient), 400);
 }
 
+#[test]
+fn direct_transfers_count_toward_deposit_limit() {
+    let s = Setup::new(1_000_000);
+
+    s.client.deposit(&s.user, &999_900);
+    s.token.transfer(&s.user, &s.client.address, &100);
+
+    assert_eq!(
+        s.client.try_deposit(&s.user, &1),
+        Err(Ok(Error::LimitExceeded))
+    );
+}
+
+#[test]
+fn direct_transfers_are_withdrawable_by_owner() {
+    let s = Setup::new(1_000_000);
+
+    s.client.deposit(&s.user, &500);
+    s.token.transfer(&s.user, &s.client.address, &200);
+
+    let recipient = Address::generate(&s.env);
+    s.client.withdraw(&s.owner, &recipient, &700);
+
+    assert_eq!(s.token.balance(&recipient), 700);
+}
+
 // ── Auth-bypass regressions ─────────────────────────────────────────────────
 
 fn seed_vault(
@@ -125,6 +151,21 @@ fn seed_vault(
         storage::set_max_limit(env, &max_limit);
         storage::set_balance(env, &balance);
     });
+}
+
+#[test]
+#[should_panic]
+fn initialize_without_owner_auth_panics() {
+    let env = Env::default();
+    let owner = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token_addr = env
+        .register_stellar_asset_contract_v2(token_admin)
+        .address();
+    let vault_id = env.register_contract(None, super::TokenVault);
+    let client = TokenVaultClient::new(&env, &vault_id);
+
+    client.initialize(&owner, &token_addr, &1_000_000);
 }
 
 #[test]
