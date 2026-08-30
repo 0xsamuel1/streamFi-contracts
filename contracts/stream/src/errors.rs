@@ -21,4 +21,5 @@ pub enum Error {
     InvalidAmount = 15,
     ReentrancyForbidden = 16,
     OperatorAlreadySet = 17,
+    NotInitialized = 18,
 }
