@@ -1,6 +1,6 @@
 #![cfg(test)]
 
-use drip_oracle::{OracleConfig, TwapOracleClient};
+use drip_oracle::{OracleConfig, Role, TwapOracleClient};
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
     Address, Env,
@@ -16,6 +16,7 @@ fn test_oracle_concurrency_locking() {
     let client = TwapOracleClient::new(&env, &contract_id);
 
     client.initialize(&admin);
+    client.grant_role(&admin, &Role::PriceFeeder, &admin);
 
     let config = OracleConfig {
         decimals: 6,
@@ -61,6 +62,7 @@ fn test_concurrent_stress_simulation() {
     let client = TwapOracleClient::new(&env, &contract_id);
 
     client.initialize(&admin);
+    client.grant_role(&admin, &Role::PriceFeeder, &admin);
     let config = OracleConfig {
         decimals: 6,
         asset_peg: 0,
@@ -87,6 +89,7 @@ fn test_precision_safe_math() {
     let client = TwapOracleClient::new(&env, &contract_id);
 
     client.initialize(&admin);
+    client.grant_role(&admin, &Role::PriceFeeder, &admin);
     let config = OracleConfig {
         decimals: 6,
         asset_peg: 0,
@@ -119,6 +122,7 @@ fn test_staleness_check() {
     let client = TwapOracleClient::new(&env, &contract_id);
 
     client.initialize(&admin);
+    client.grant_role(&admin, &Role::PriceFeeder, &admin);
     let config = OracleConfig {
         decimals: 6,
         asset_peg: 0,
