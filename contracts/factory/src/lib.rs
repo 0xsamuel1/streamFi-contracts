@@ -318,6 +318,18 @@ impl DripFactory {
             .get(&DataKey::StreamAddr(stream_id))
     }
 
+    /// Permissionlessly advance migration of one sender's legacy index into
+    /// paged storage. Returns the number of legacy entries migrated so far.
+    pub fn migrate_sender_index(env: Env, sender: Address, max_pages: u32) -> u32 {
+        index::migrate_sender_index(&env, sender, max_pages)
+    }
+
+    /// Permissionlessly advance migration of one recipient's legacy index into
+    /// paged storage. Returns the number of legacy entries migrated so far.
+    pub fn migrate_recipient_index(env: Env, recipient: Address, max_pages: u32) -> u32 {
+        index::migrate_recipient_index(&env, recipient, max_pages)
+    }
+
     /// Cancel multiple streams in one transaction, all authorized by the
     /// same `sender`.
     ///
