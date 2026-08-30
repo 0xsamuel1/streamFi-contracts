@@ -10,8 +10,8 @@ use drip_common::{TTL_EXTEND_TO, TTL_THRESHOLD};
 use errors::Error;
 use soroban_sdk::{contract, contractimpl, token, Address, Env};
 use storage::{
-    get_balance, get_max_limit, get_operator, get_owner, get_token, is_paused, remove_operator,
-    set_balance, set_max_limit, set_operator, set_owner, set_paused, set_token,
+    get_max_limit, get_operator, get_owner, get_token, is_paused, remove_operator, set_max_limit,
+    set_operator, set_owner, set_paused, set_token,
 };
 
 #[contract]
@@ -24,6 +24,15 @@ fn bump_instance(env: &Env) {
     env.storage()
         .instance()
         .extend_ttl(TTL_THRESHOLD, TTL_EXTEND_TO);
+}
+
+fn token_client(env: &Env) -> Result<token::Client<'_>, Error> {
+    let token_addr = get_token(env).ok_or(Error::NotInitialized)?;
+    Ok(token::Client::new(env, &token_addr))
+}
+
+fn vault_balance(env: &Env) -> Result<i128, Error> {
+    Ok(token_client(env)?.balance(&env.current_contract_address()))
 }
 
 /// Checks that `caller` is either the vault owner or the currently delegated
@@ -75,6 +84,8 @@ impl TokenVault {
         token: Address,
         max_limit: i128,
     ) -> Result<(), Error> {
+        owner.require_auth();
+
         if max_limit <= 0 {
             return Err(Error::InvalidAmount);
         }
@@ -87,7 +98,6 @@ impl TokenVault {
         set_owner(&env, &owner);
         set_token(&env, &token);
         set_max_limit(&env, &max_limit);
-        set_balance(&env, &0_i128);
 
         events::initialized(&env, &owner, &token, max_limit);
         Ok(())
@@ -102,23 +112,24 @@ impl TokenVault {
         }
 
         let _owner = get_owner(&env).ok_or(Error::NotInitialized)?;
-        // Check current balance and max_limit safely
-        let balance = get_balance(&env).unwrap_or(0_i128);
+        let balance = vault_balance(&env)?;
         let max = get_max_limit(&env).ok_or(Error::NotInitialized)?;
 
-        let new_balance = balance
+        let expected_balance = balance
             .checked_add(amount)
             .ok_or(Error::ArithmeticOverflow)?;
+        if expected_balance > max {
+            return Err(Error::LimitExceeded);
+        }
+
+        let tk = token_client(&env)?;
+        tk.transfer(&from, &env.current_contract_address(), &amount);
+        let new_balance = tk.balance(&env.current_contract_address());
         if new_balance > max {
             return Err(Error::LimitExceeded);
         }
 
-        // perform token transfer
-        let tk = token::Client::new(&env, &get_token(&env).ok_or(Error::NotInitialized)?);
-        tk.transfer(&from, &env.current_contract_address(), &amount);
-
         bump_instance(&env);
-        set_balance(&env, &new_balance);
         events::deposited(&env, &from, amount, new_balance);
         Ok(())
     }
@@ -132,16 +143,15 @@ impl TokenVault {
             return Err(Error::InvalidAmount);
         }
 
-        let balance = get_balance(&env).unwrap_or(0_i128);
+        let balance = vault_balance(&env)?;
         let new_balance = balance
             .checked_sub(amount)
             .ok_or(Error::ArithmeticOverflow)?;
 
-        let tk = token::Client::new(&env, &get_token(&env).ok_or(Error::NotInitialized)?);
+        let tk = token_client(&env)?;
         tk.transfer(&env.current_contract_address(), &to, &amount);
 
         bump_instance(&env);
-        set_balance(&env, &new_balance);
         events::withdrawn(&env, &caller, &to, amount, new_balance);
         Ok(())
     }
@@ -154,7 +164,7 @@ impl TokenVault {
         if new_limit <= 0 {
             return Err(Error::InvalidAmount);
         }
-        let balance = get_balance(&env).unwrap_or(0_i128);
+        let balance = vault_balance(&env)?;
         if new_limit < balance {
             return Err(Error::LimitExceeded);
         }
