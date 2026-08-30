@@ -146,6 +146,7 @@ fn collect_page(
         .unwrap_or(Vec::new(env))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn read_index(
     env: &Env,
     count_key: &DataKey,
