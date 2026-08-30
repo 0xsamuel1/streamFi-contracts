@@ -43,10 +43,12 @@ pub fn get_max_limit(env: &Env) -> Option<i128> {
     env.storage().instance().get(&DataKey::MaxLimit)
 }
 
+#[cfg(test)]
 pub fn set_balance(env: &Env, v: &i128) {
     env.storage().instance().set(&DataKey::Balance, v);
 }
 
+#[cfg(test)]
 pub fn get_balance(env: &Env) -> Option<i128> {
     env.storage().instance().get(&DataKey::Balance)
 }
