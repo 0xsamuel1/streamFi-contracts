@@ -3,6 +3,7 @@ use soroban_sdk::{Address, Env, Vec};
 use crate::{query, storage::DataKey, ttl};
 
 const PAGE_SIZE: u32 = query::MAX_PAGE_SIZE;
+const MIGRATION_PAGES_PER_APPEND: u32 = 1;
 
 fn extend_ttl(env: &Env, key: &DataKey) {
     env.storage()
@@ -15,54 +16,106 @@ fn write_page(env: &Env, key: DataKey, page: &Vec<u64>) {
     extend_ttl(env, &key);
 }
 
+fn append_base(legacy_count: u32) -> u32 {
+    if legacy_count == 0 {
+        0
+    } else {
+        ((legacy_count - 1) / PAGE_SIZE + 1) * PAGE_SIZE
+    }
+}
+
+fn logical_to_physical_offset(logical: u32, legacy_count: Option<u32>) -> u32 {
+    match legacy_count {
+        Some(legacy_count) if logical >= legacy_count => {
+            append_base(legacy_count).saturating_add(logical - legacy_count)
+        }
+        _ => logical,
+    }
+}
+
 fn migrate_legacy_index(
     env: &Env,
     legacy_key: &DataKey,
     count_key: &DataKey,
+    cursor_key: &DataKey,
+    legacy_count_key: &DataKey,
     mut make_page_key: impl FnMut(u32) -> DataKey,
+    max_pages: u32,
 ) -> u32 {
-    if let Some(count) = env.storage().persistent().get::<_, u32>(count_key) {
-        return count;
-    }
-
     let legacy: Option<Vec<u64>> = env.storage().persistent().get(legacy_key);
     let Some(entries) = legacy else {
-        return 0;
+        return env.storage().persistent().get(count_key).unwrap_or(0);
     };
 
-    let count = entries.len();
-    let mut page = Vec::new(env);
-    let mut page_index = 0_u32;
+    let legacy_count = env
+        .storage()
+        .persistent()
+        .get(legacy_count_key)
+        .unwrap_or(entries.len());
+    let total_count = env
+        .storage()
+        .persistent()
+        .get(count_key)
+        .unwrap_or(legacy_count);
+    let mut cursor = env.storage().persistent().get(cursor_key).unwrap_or(0_u32);
+    let mut migrated_pages = 0_u32;
 
-    for entry in entries.iter() {
-        page.push_back(entry);
-        if page.len() == PAGE_SIZE {
-            write_page(env, make_page_key(page_index), &page);
-            page = Vec::new(env);
-            page_index = page_index.saturating_add(1);
+    while cursor < legacy_count && migrated_pages < max_pages {
+        let page_index = cursor / PAGE_SIZE;
+        let end = cursor.saturating_add(PAGE_SIZE).min(legacy_count);
+        let mut page = Vec::new(env);
+
+        let mut i = cursor;
+        while i < end {
+            page.push_back(entries.get(i).unwrap());
+            i = i.saturating_add(1);
         }
-    }
 
-    if !page.is_empty() {
         write_page(env, make_page_key(page_index), &page);
+        cursor = end;
+        migrated_pages = migrated_pages.saturating_add(1);
     }
 
-    env.storage().persistent().set(count_key, &count);
+    env.storage().persistent().set(count_key, &total_count);
     extend_ttl(env, count_key);
-    env.storage().persistent().remove(legacy_key);
+    env.storage()
+        .persistent()
+        .set(legacy_count_key, &legacy_count);
+    extend_ttl(env, legacy_count_key);
 
-    count
+    if cursor >= legacy_count {
+        env.storage().persistent().remove(legacy_key);
+        env.storage().persistent().remove(cursor_key);
+    } else {
+        env.storage().persistent().set(cursor_key, &cursor);
+        extend_ttl(env, cursor_key);
+        extend_ttl(env, legacy_key);
+    }
+
+    total_count
 }
 
 fn append_index_entry(
     env: &Env,
     count_key: &DataKey,
     legacy_key: &DataKey,
+    cursor_key: &DataKey,
+    legacy_count_key: &DataKey,
     mut make_page_key: impl FnMut(u32) -> DataKey,
     entry: u64,
 ) {
-    let count = migrate_legacy_index(env, legacy_key, count_key, &mut make_page_key);
-    let page_index = count / PAGE_SIZE;
+    let count = migrate_legacy_index(
+        env,
+        legacy_key,
+        count_key,
+        cursor_key,
+        legacy_count_key,
+        &mut make_page_key,
+        MIGRATION_PAGES_PER_APPEND,
+    );
+    let legacy_count = env.storage().persistent().get(legacy_count_key);
+    let physical_offset = logical_to_physical_offset(count, legacy_count);
+    let page_index = physical_offset / PAGE_SIZE;
     let page_key = make_page_key(page_index);
 
     let mut page: Vec<u64> = env
@@ -97,6 +150,8 @@ fn read_index(
     env: &Env,
     count_key: &DataKey,
     legacy_key: &DataKey,
+    cursor_key: &DataKey,
+    legacy_count_key: &DataKey,
     mut make_page_key: impl FnMut(u32) -> DataKey,
     offset: u32,
     limit: u32,
@@ -107,33 +162,47 @@ fn read_index(
             return Vec::new(env);
         }
 
+        let legacy_count = env.storage().persistent().get::<_, u32>(legacy_count_key);
+        if env.storage().persistent().has(legacy_count_key) {
+            extend_ttl(env, legacy_count_key);
+        }
+        let cursor = env.storage().persistent().get::<_, u32>(cursor_key);
+        if env.storage().persistent().has(cursor_key) {
+            extend_ttl(env, cursor_key);
+        }
+        let legacy: Option<Vec<u64>> = env.storage().persistent().get(legacy_key);
+        if legacy.is_some() {
+            extend_ttl(env, legacy_key);
+        }
+
         let effective_limit = limit.min(PAGE_SIZE);
         let end = offset.saturating_add(effective_limit).min(count);
         let mut result = Vec::new(env);
-        let mut cursor = offset;
+        let mut logical = offset;
 
-        while cursor < end {
-            let page_index = cursor / PAGE_SIZE;
-            let page_offset = (cursor % PAGE_SIZE) as usize;
+        while logical < end {
+            if let (Some(legacy_count), Some(cursor), Some(entries)) =
+                (legacy_count, cursor, legacy.clone())
+            {
+                if logical < legacy_count && logical >= cursor {
+                    result.push_back(entries.get(logical).unwrap());
+                    logical = logical.saturating_add(1);
+                    continue;
+                }
+            }
+
+            let physical = logical_to_physical_offset(logical, legacy_count);
+            let page_index = physical / PAGE_SIZE;
+            let page_offset = (physical % PAGE_SIZE) as usize;
             let page = collect_page(env, &mut make_page_key, page_index);
             let page_len = page.len() as usize;
 
             if page_offset >= page_len {
-                let next_page_start = page_index.saturating_add(1).saturating_mul(PAGE_SIZE);
-                if next_page_start <= cursor {
-                    break;
-                }
-                cursor = next_page_start;
-                continue;
+                break;
             }
 
-            let remaining_in_page = page_len - page_offset;
-            let remaining_total = (end - cursor) as usize;
-            let take = remaining_in_page.min(remaining_total);
-            for i in page_offset..(page_offset + take) {
-                result.push_back(page.get(i as u32).unwrap());
-            }
-            cursor = cursor.saturating_add(take as u32);
+            result.push_back(page.get(page_offset as u32).unwrap());
+            logical = logical.saturating_add(1);
         }
 
         return result;
@@ -170,10 +239,14 @@ fn count_index(env: &Env, count_key: &DataKey, legacy_key: &DataKey) -> u32 {
 pub fn append_sender_index(env: &Env, sender: &Address, stream_id: u64) {
     let count_key = DataKey::BySenderCount(sender.clone());
     let legacy_key = DataKey::BySender(sender.clone());
+    let cursor_key = DataKey::BySenderMigrationCursor(sender.clone());
+    let legacy_count_key = DataKey::BySenderLegacyCount(sender.clone());
     append_index_entry(
         env,
         &count_key,
         &legacy_key,
+        &cursor_key,
+        &legacy_count_key,
         |page| DataKey::BySenderPage(sender.clone(), page),
         stream_id,
     );
@@ -182,22 +255,70 @@ pub fn append_sender_index(env: &Env, sender: &Address, stream_id: u64) {
 pub fn append_recipient_index(env: &Env, recipient: &Address, stream_id: u64) {
     let count_key = DataKey::ByRecipientCount(recipient.clone());
     let legacy_key = DataKey::ByRecipient(recipient.clone());
+    let cursor_key = DataKey::ByRecipientMigrationCursor(recipient.clone());
+    let legacy_count_key = DataKey::ByRecipientLegacyCount(recipient.clone());
     append_index_entry(
         env,
         &count_key,
         &legacy_key,
+        &cursor_key,
+        &legacy_count_key,
         |page| DataKey::ByRecipientPage(recipient.clone(), page),
         stream_id,
     );
 }
 
+pub fn migrate_sender_index(env: &Env, sender: Address, max_pages: u32) -> u32 {
+    let count_key = DataKey::BySenderCount(sender.clone());
+    let legacy_key = DataKey::BySender(sender.clone());
+    let cursor_key = DataKey::BySenderMigrationCursor(sender.clone());
+    let legacy_count_key = DataKey::BySenderLegacyCount(sender.clone());
+    migrate_legacy_index(
+        env,
+        &legacy_key,
+        &count_key,
+        &cursor_key,
+        &legacy_count_key,
+        |page| DataKey::BySenderPage(sender.clone(), page),
+        max_pages,
+    );
+    env.storage()
+        .persistent()
+        .get(&cursor_key)
+        .unwrap_or_else(|| env.storage().persistent().get(&count_key).unwrap_or(0))
+}
+
+pub fn migrate_recipient_index(env: &Env, recipient: Address, max_pages: u32) -> u32 {
+    let count_key = DataKey::ByRecipientCount(recipient.clone());
+    let legacy_key = DataKey::ByRecipient(recipient.clone());
+    let cursor_key = DataKey::ByRecipientMigrationCursor(recipient.clone());
+    let legacy_count_key = DataKey::ByRecipientLegacyCount(recipient.clone());
+    migrate_legacy_index(
+        env,
+        &legacy_key,
+        &count_key,
+        &cursor_key,
+        &legacy_count_key,
+        |page| DataKey::ByRecipientPage(recipient.clone(), page),
+        max_pages,
+    );
+    env.storage()
+        .persistent()
+        .get(&cursor_key)
+        .unwrap_or_else(|| env.storage().persistent().get(&count_key).unwrap_or(0))
+}
+
 pub fn streams_by_sender(env: &Env, sender: Address, offset: u32, limit: u32) -> Vec<u64> {
     let count_key = DataKey::BySenderCount(sender.clone());
     let legacy_key = DataKey::BySender(sender.clone());
+    let cursor_key = DataKey::BySenderMigrationCursor(sender.clone());
+    let legacy_count_key = DataKey::BySenderLegacyCount(sender.clone());
     read_index(
         env,
         &count_key,
         &legacy_key,
+        &cursor_key,
+        &legacy_count_key,
         |page| DataKey::BySenderPage(sender.clone(), page),
         offset,
         limit,
@@ -207,10 +328,14 @@ pub fn streams_by_sender(env: &Env, sender: Address, offset: u32, limit: u32) ->
 pub fn streams_by_recipient(env: &Env, recipient: Address, offset: u32, limit: u32) -> Vec<u64> {
     let count_key = DataKey::ByRecipientCount(recipient.clone());
     let legacy_key = DataKey::ByRecipient(recipient.clone());
+    let cursor_key = DataKey::ByRecipientMigrationCursor(recipient.clone());
+    let legacy_count_key = DataKey::ByRecipientLegacyCount(recipient.clone());
     read_index(
         env,
         &count_key,
         &legacy_key,
+        &cursor_key,
+        &legacy_count_key,
         |page| DataKey::ByRecipientPage(recipient.clone(), page),
         offset,
         limit,
