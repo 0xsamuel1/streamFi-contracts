@@ -9,7 +9,7 @@ use soroban_sdk::{
     Address, BytesN, Env,
 };
 
-use crate::{DripFactory, DripFactoryClient, Error};
+use crate::{storage::DataKey, DripFactory, DripFactoryClient, Error};
 
 /// Register a factory and initialize it with a dummy stream WASM hash and a
 /// freshly generated governor. Auth is mocked, so the governor-gated
@@ -243,6 +243,88 @@ fn upgrade_blocked_while_paused_then_allowed_after_unpause() {
         s.client.try_upgrade(&zero_hash),
         Err(Ok(Error::InvalidWasmHash))
     );
+}
+
+// ── Legacy index migration (#383) ─────────────────────────────────────────
+
+#[test]
+fn legacy_sender_index_migration_is_incremental() {
+    let s = Setup::new();
+    let sender = Address::generate(&s.env);
+
+    s.env.as_contract(&s.client.address, || {
+        let mut legacy = soroban_sdk::Vec::new(&s.env);
+        for id in 0..250_u64 {
+            legacy.push_back(id);
+        }
+        s.env
+            .storage()
+            .persistent()
+            .set(&DataKey::BySender(sender.clone()), &legacy);
+    });
+
+    assert_eq!(s.client.stream_count_by_sender(&sender), 250);
+    assert_eq!(s.client.migrate_sender_index(&sender, &1), 100);
+
+    s.env.as_contract(&s.client.address, || {
+        assert!(s
+            .env
+            .storage()
+            .persistent()
+            .has(&DataKey::BySender(sender.clone())));
+        assert_eq!(
+            s.env
+                .storage()
+                .persistent()
+                .get::<_, u32>(&DataKey::BySenderMigrationCursor(sender.clone())),
+            Some(100)
+        );
+    });
+
+    let page = s.client.streams_by_sender(&sender, &95, &10);
+    assert_eq!(page.len(), 10);
+    assert_eq!(page.get(0).unwrap(), 95);
+    assert_eq!(page.get(9).unwrap(), 104);
+
+    assert_eq!(s.client.migrate_sender_index(&sender, &10), 250);
+    s.env.as_contract(&s.client.address, || {
+        assert!(!s
+            .env
+            .storage()
+            .persistent()
+            .has(&DataKey::BySender(sender.clone())));
+    });
+}
+
+#[test]
+fn append_during_partial_sender_migration_preserves_order() {
+    let s = Setup::new();
+    let sender = Address::generate(&s.env);
+
+    s.env.as_contract(&s.client.address, || {
+        let mut legacy = soroban_sdk::Vec::new(&s.env);
+        for id in 0..150_u64 {
+            legacy.push_back(id);
+        }
+        s.env
+            .storage()
+            .persistent()
+            .set(&DataKey::BySender(sender.clone()), &legacy);
+
+        crate::index::append_sender_index(&s.env, &sender, 999);
+    });
+
+    assert_eq!(s.client.stream_count_by_sender(&sender), 151);
+
+    let tail = s.client.streams_by_sender(&sender, &145, &10);
+    assert_eq!(tail.len(), 6);
+    assert_eq!(tail.get(0).unwrap(), 145);
+    assert_eq!(tail.get(4).unwrap(), 149);
+    assert_eq!(tail.get(5).unwrap(), 999);
+
+    assert_eq!(s.client.migrate_sender_index(&sender, &10), 151);
+    let tail_after = s.client.streams_by_sender(&sender, &145, &10);
+    assert_eq!(tail_after, tail);
 }
 
 // ── Issue #204: cancel_batch_streams ─────────────────────────────────────────
