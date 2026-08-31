@@ -97,3 +97,26 @@ pub fn unpaused(env: &Env, caller: &Address, resumed_at: u64) {
     env.events()
         .publish((symbol_short!("unpaused"), caller.clone()), resumed_at);
 }
+
+/// Emitted by `propose_owner` (step 1 of the 2-step owner transfer).
+///
+/// Topics: `("propose", caller)` — the current owner.
+/// Data:   `new_owner` — the proposed pending owner address.
+///
+/// The transfer is not complete until `accept_owner` is called by the
+/// proposed address. Mirrors `DripGovernor`'s `propose_authority`.
+pub fn owner_proposed(env: &Env, caller: &Address, new_owner: &Address) {
+    env.events().publish(
+        (symbol_short!("propose"), caller.clone()),
+        new_owner.clone(),
+    );
+}
+
+/// Emitted by `accept_owner` (step 2 of the 2-step owner transfer).
+///
+/// Topics: `("accept", caller)` — the new owner that accepted the transfer.
+/// Data:   `old_owner` — the previous owner, who loses ownership.
+pub fn owner_accepted(env: &Env, caller: &Address, old_owner: &Address) {
+    env.events()
+        .publish((symbol_short!("accept"), caller.clone()), old_owner.clone());
+}

@@ -5,7 +5,7 @@ extern crate std;
 use soroban_sdk::{
     symbol_short,
     testutils::{storage::Instance as _, Address as _, Events as _},
-    token, Address, Env, IntoVal, TryIntoVal,
+    token, Address, Env, IntoVal, String, TryIntoVal,
 };
 
 use crate::errors::Error;
@@ -706,4 +706,146 @@ fn operator_and_pause_mutations_extend_instance_ttl() {
         .env
         .as_contract(&s.client.address, || s.env.storage().instance().get_ttl());
     assert!(ttl >= 100_000, "instance TTL after unpause: {ttl}");
+}
+
+// ── Two-step owner transfer tests ───────────────────────────────────────────
+
+#[test]
+fn owner_can_propose_and_new_owner_accepts() {
+    let s = Setup::new(1_000_000);
+    let new_owner = Address::generate(&s.env);
+
+    assert_eq!(s.client.owner(), Some(s.owner.clone()));
+    s.client.propose_owner(&s.owner, &new_owner);
+    s.client.accept_owner(&new_owner);
+
+    assert_eq!(s.client.owner(), Some(new_owner));
+}
+
+#[test]
+fn propose_owner_rejects_zero_address() {
+    let s = Setup::new(1_000_000);
+    let zero = Address::from_string(&String::from_str(
+        &s.env,
+        "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4",
+    ));
+    let result = s.client.try_propose_owner(&s.owner, &zero);
+    assert_eq!(result, Err(Ok(Error::InvalidParam)));
+}
+
+#[test]
+fn non_owner_cannot_propose_owner() {
+    let s = Setup::new(1_000_000);
+    let stranger = Address::generate(&s.env);
+    let new_owner = Address::generate(&s.env);
+    let result = s.client.try_propose_owner(&stranger, &new_owner);
+    assert_eq!(result, Err(Ok(Error::NotAuthorized)));
+}
+
+#[test]
+fn accept_owner_when_none_pending_is_rejected() {
+    let s = Setup::new(1_000_000);
+    let stranger = Address::generate(&s.env);
+    let result = s.client.try_accept_owner(&stranger);
+    assert_eq!(result, Err(Ok(Error::NoPendingOwner)));
+}
+
+#[test]
+fn accept_owner_by_non_pending_address_is_rejected() {
+    let s = Setup::new(1_000_000);
+    let new_owner = Address::generate(&s.env);
+    let stranger = Address::generate(&s.env);
+
+    s.client.propose_owner(&s.owner, &new_owner);
+    let result = s.client.try_accept_owner(&stranger);
+    assert_eq!(result, Err(Ok(Error::NotPendingOwner)));
+}
+
+#[test]
+fn propose_owner_does_not_change_ownership_until_accept() {
+    let s = Setup::new(1_000_000);
+    let new_owner = Address::generate(&s.env);
+
+    s.client.propose_owner(&s.owner, &new_owner);
+    // Old owner retains authority until the transfer is accepted.
+    assert_eq!(s.client.owner(), Some(s.owner.clone()));
+
+    // Proposing while a transfer is already pending is rejected for a
+    // non-owner... but the old owner can still propose, which simply
+    // overwrites the pending owner. The real owner stays until accept.
+    let other = Address::generate(&s.env);
+    s.client.propose_owner(&s.owner, &other);
+    assert_eq!(s.client.owner(), Some(s.owner.clone()));
+}
+
+#[test]
+fn new_owner_gains_privileges_after_accept() {
+    let s = Setup::new(1_000_000);
+    let new_owner = Address::generate(&s.env);
+
+    // Before accept, the new owner cannot pause.
+    assert_eq!(
+        s.client.try_pause(&new_owner),
+        Err(Ok(Error::NotAuthorized))
+    );
+
+    s.client.propose_owner(&s.owner, &new_owner);
+    s.client.accept_owner(&new_owner);
+
+    // After accept, the new owner can pause and the old owner cannot.
+    s.client.pause(&new_owner);
+    assert!(s.client.is_paused());
+    assert_eq!(
+        s.client.try_unpause(&s.owner),
+        Err(Ok(Error::NotAuthorized))
+    );
+    s.client.unpause(&new_owner);
+}
+
+#[test]
+fn owner_transfer_emits_events() {
+    let s = Setup::new(1_000_000);
+    let new_owner = Address::generate(&s.env);
+
+    s.client.propose_owner(&s.owner, &new_owner);
+    let events = vault_events(&s);
+    assert_eq!(events.len(), 2);
+    let (_, topics, data) = &events[1];
+    assert_eq!(
+        topics.clone(),
+        (symbol_short!("propose"), s.owner.clone()).into_val(&s.env)
+    );
+    let payload: Address = data.clone().try_into_val(&s.env).unwrap();
+    assert_eq!(payload, new_owner);
+
+    s.client.accept_owner(&new_owner);
+    let events = vault_events(&s);
+    assert_eq!(events.len(), 3);
+    let (_, topics, data) = &events[2];
+    assert_eq!(
+        topics.clone(),
+        (symbol_short!("accept"), new_owner.clone()).into_val(&s.env)
+    );
+    let payload: Address = data.clone().try_into_val(&s.env).unwrap();
+    assert_eq!(payload, s.owner);
+}
+
+#[test]
+fn uninitialized_vault_rejects_owner_transfer() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let vault_id = env.register_contract(None, super::TokenVault);
+    let client = TokenVaultClient::new(&env, &vault_id);
+
+    let caller = Address::generate(&env);
+    let new_owner = Address::generate(&env);
+
+    assert_eq!(
+        client.try_propose_owner(&caller, &new_owner),
+        Err(Ok(Error::NotInitialized))
+    );
+    assert_eq!(
+        client.try_accept_owner(&caller),
+        Err(Ok(Error::NoPendingOwner))
+    );
 }
