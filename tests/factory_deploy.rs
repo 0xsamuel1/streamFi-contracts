@@ -93,7 +93,8 @@ fn streams_by_sender_returns_empty_for_unknown_address() {
     let client = deploy_factory(&env);
     let sender = Address::generate(&env);
     let result = client.streams_by_sender(&sender, &0, &10);
-    assert_eq!(result.len(), 0);
+    assert_eq!(result.ids.len(), 0);
+    assert_eq!(result.total, 0);
 }
 
 #[test]
@@ -104,7 +105,7 @@ fn pagination_does_not_panic_when_offset_plus_limit_overflows_u32() {
     // offset + limit would overflow u32 with raw addition; must not panic
     // and must simply return no results since the index is empty.
     let result = client.streams_by_sender(&sender, &u32::MAX, &u32::MAX);
-    assert_eq!(result.len(), 0);
+    assert_eq!(result.ids.len(), 0);
 }
 
 #[test]
@@ -137,13 +138,15 @@ fn pagination_clamps_offset_near_u32_max_against_populated_index() {
     // would overflow u32 with raw addition, so this must clamp to an empty
     // result rather than panicking.
     let by_sender = client.streams_by_sender(&sender, &(u32::MAX - 1), &10);
-    assert_eq!(by_sender.len(), 0);
+    assert_eq!(by_sender.ids.len(), 0);
+    assert_eq!(by_sender.total, 3);
     let by_recipient = client.streams_by_recipient(&recip, &(u32::MAX - 1), &10);
-    assert_eq!(by_recipient.len(), 0);
+    assert_eq!(by_recipient.ids.len(), 0);
+    assert_eq!(by_recipient.total, 3);
 
     // A valid in-range offset combined with a limit near u32::MAX must still
     // clamp to the index's actual length instead of overflowing.
-    let tail = client.streams_by_sender(&sender, &1, &u32::MAX);
+    let tail = client.streams_by_sender(&sender, &1, &u32::MAX).ids;
     assert_eq!(tail.len(), 2);
     assert_eq!(tail.get(0), Some(2));
     assert_eq!(tail.get(1), Some(3));
@@ -155,7 +158,8 @@ fn streams_by_recipient_returns_empty_for_unknown_address() {
     let client = deploy_factory(&env);
     let recip = Address::generate(&env);
     let result = client.streams_by_recipient(&recip, &0, &10);
-    assert_eq!(result.len(), 0);
+    assert_eq!(result.ids.len(), 0);
+    assert_eq!(result.total, 0);
 }
 
 #[test]
