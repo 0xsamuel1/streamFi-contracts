@@ -1466,3 +1466,364 @@ fn sender_still_can_pause_after_setting_operator() {
 // satisfy this auth because they are not the recipient. This is already covered
 // by the existing withdraw tests (which always pass recipient auth) and would
 // require disabling mock_all_auths() to test negative cases properly.
+
+// ── Issue #378 / #379 / #380 / #381 regression + guard tests ────────────────
+//
+// `Setup::new` always mints `rate * duration` for a bounded window — the
+// deposit the factory requires but direct `initialize` (ADR-001) does not.
+// These helpers build a directly-initialized stream with an arbitrary
+// `deposit` and `end_time` so the under-funded / open-ended paths and the new
+// `initialize` / `withdraw` / `top_up` guards can be exercised.
+
+/// Register a fresh env + token, then directly `initialize` a stream with a
+/// custom `deposit` and `end_time` (`end == 0` => open-ended).
+fn direct_stream(
+    env: &Env,
+    rate: i128,
+    deposit: i128,
+    start: u64,
+    end: u64,
+) -> (DripStreamClient<'_>, token::Client<'_>, Address, Address) {
+    env.mock_all_auths();
+    let sender = Address::generate(env);
+    let recipient = Address::generate(env);
+    let token_admin = Address::generate(env);
+    let token_addr = env
+        .register_stellar_asset_contract_v2(token_admin.clone())
+        .address();
+    let tok = token::Client::new(env, &token_addr);
+    let tok_admin = token::StellarAssetClient::new(env, &token_addr);
+    if deposit > 0 {
+        tok_admin.mint(&sender, &deposit);
+    }
+    env.ledger().set(LedgerInfo {
+        timestamp: start,
+        protocol_version: 21,
+        sequence_number: 1,
+        network_id: Default::default(),
+        base_reserve: 10,
+        min_temp_entry_ttl: 16,
+        min_persistent_entry_ttl: 4096,
+        max_entry_ttl: 6_312_000,
+    });
+    let stream_id = env.register_contract(None, DripStream);
+    let client = DripStreamClient::new(env, &stream_id);
+    if deposit > 0 {
+        tok.transfer(&sender, &stream_id, &deposit);
+    }
+    client.initialize(
+        &sender,
+        &recipient,
+        &token_addr,
+        &rate,
+        &start,
+        &end,
+        &false,
+    );
+    (client, tok, sender, recipient)
+}
+
+/// Advance a non-`'static` env's ledger timestamp by `secs`.
+fn advance(env: &Env, secs: u64) {
+    let ts = env.ledger().timestamp() + secs;
+    env.ledger().set(LedgerInfo {
+        timestamp: ts,
+        ..env.ledger().get()
+    });
+}
+
+/// The all-zero Stellar account address (an unspendable sink).
+fn zero_account(env: &Env) -> Address {
+    Address::from_string(&soroban_sdk::String::from_str(
+        env,
+        "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+    ))
+}
+
+/// Baseline env + token + bare stream contract for testing `initialize` guards.
+/// Sets the ledger clock to `BASE_TIME` so `start_time` comparisons are stable.
+fn fresh_init_env(env: &Env) -> (Address, Address, Address, DripStreamClient<'_>) {
+    env.mock_all_auths();
+    let sender = Address::generate(env);
+    let recipient = Address::generate(env);
+    let token_admin = Address::generate(env);
+    let token_addr = env
+        .register_stellar_asset_contract_v2(token_admin.clone())
+        .address();
+    let stream_id = env.register_contract(None, DripStream);
+    let client = DripStreamClient::new(env, &stream_id);
+    env.ledger().set(LedgerInfo {
+        timestamp: BASE_TIME,
+        protocol_version: 21,
+        sequence_number: 1,
+        network_id: Default::default(),
+        base_reserve: 10,
+        min_temp_entry_ttl: 16,
+        min_persistent_entry_ttl: 4096,
+        max_entry_ttl: 6_312_000,
+    });
+    (sender, recipient, token_addr, client)
+}
+
+/// Stable baseline ledger timestamp used by the direct-init tests.
+const BASE_TIME: u64 = 1_000_000;
+
+// ── Issue #378: initialize() must enforce the factory's recipient/time guards ─
+
+#[test]
+#[should_panic(expected = "Error(Contract, #18)")]
+fn initialize_rejects_zero_address_recipient() {
+    let env = Env::default();
+    let (sender, _recipient, token_addr, client) = fresh_init_env(&env);
+    // Zero-address recipient → unspendable sink. Direct init must reject it
+    // just like `create_stream` does (factory error `InvalidRecipient`).
+    client.initialize(
+        &sender,
+        &zero_account(&env),
+        &token_addr,
+        &100,
+        &BASE_TIME,
+        &(BASE_TIME + 3_600),
+        &false,
+    );
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #18)")]
+fn initialize_rejects_self_recipient() {
+    let env = Env::default();
+    let (sender, _recipient, token_addr, client) = fresh_init_env(&env);
+    // recipient == sender → self-stream; must be rejected.
+    client.initialize(
+        &sender,
+        &sender,
+        &token_addr,
+        &100,
+        &BASE_TIME,
+        &(BASE_TIME + 3_600),
+        &false,
+    );
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #19)")]
+fn initialize_rejects_backdated_start_time() {
+    let env = Env::default();
+    let (sender, recipient, token_addr, client) = fresh_init_env(&env);
+    // start_time one second before the ledger clock → BackdatedStream.
+    client.initialize(
+        &sender,
+        &recipient,
+        &token_addr,
+        &100,
+        &(BASE_TIME - 1),
+        &(BASE_TIME + 3_600),
+        &false,
+    );
+}
+
+/// A valid direct init (start == now, distinct non-zero recipient) still works.
+#[test]
+fn initialize_accepts_valid_direct_init() {
+    let env = Env::default();
+    let (sender, recipient, token_addr, client) = fresh_init_env(&env);
+    client.initialize(
+        &sender,
+        &recipient,
+        &token_addr,
+        &100,
+        &BASE_TIME,
+        &(BASE_TIME + 3_600),
+        &false,
+    );
+    let info = client.info();
+    assert_eq!(info.rate_per_second, 100);
+    assert_eq!(info.sender, sender);
+    assert_eq!(info.recipient, recipient);
+}
+
+// ── Issue #379: withdraw must clamp to real token balance ────────────────────
+
+#[test]
+fn withdraw_clamps_to_funded_balance_open_ended() {
+    // Open-ended stream: accrual is unbounded, funded balance is fixed (400).
+    let env = Env::default();
+    let (client, tok, _sender, recipient) = direct_stream(&env, 100, 400, BASE_TIME, 0);
+    advance(&env, 1_000); // accrued = 100 * 1_000 = 100_000 ≫ funded 400
+                          // Withdrawing the full accrued amount returns only the funded portion
+                          // instead of reverting on the unfunded slice.
+    let got = client.withdraw(&100_000);
+    assert_eq!(got, 400);
+    assert_eq!(tok.balance(&recipient), 400);
+    assert_eq!(tok.balance(&client.address), 0);
+}
+
+#[test]
+fn withdraw_clamps_to_funded_balance_bounded_underfunded() {
+    // 100s stream @ 100/s needs 10_000; only 400 funded.
+    let env = Env::default();
+    let (client, tok, _sender, recipient) =
+        direct_stream(&env, 100, 400, BASE_TIME, BASE_TIME + 100);
+    advance(&env, 100); // end_time reached; streamed = 10_000, balance = 400
+    let got = client.withdraw(&10_000);
+    assert_eq!(got, 400);
+    assert_eq!(tok.balance(&recipient), 400);
+}
+
+#[test]
+fn withdraw_stream_underfunded_when_balance_zero() {
+    // `available > 0` but the contract holds zero tokens → StreamUnderfunded,
+    // distinct from `NothingToWithdraw` ("nothing has accrued yet").
+    let env = Env::default();
+    let (client, _tok, _sender, _recipient) = direct_stream(&env, 100, 0, BASE_TIME, 0);
+    advance(&env, 100); // accrued = 10_000 > 0, balance = 0
+    assert_eq!(client.withdrawable(), 10_000);
+    assert_eq!(
+        client.try_withdraw(&10_000),
+        Err(Ok(Error::StreamUnderfunded))
+    );
+}
+
+#[test]
+fn withdraw_nothing_accrued_still_returns_nothing_to_withdraw() {
+    // Regression for #379: when `available == 0` the error stays
+    // `NothingToWithdraw` — the balance clamp must not change this case.
+    let env = Env::default();
+    let (client, _tok, _sender, _recipient) = direct_stream(&env, 100, 1_000, BASE_TIME, 0);
+    // No time advanced → nothing accrued yet.
+    assert_eq!(client.withdrawable(), 0);
+    assert_eq!(client.try_withdraw(&1), Err(Ok(Error::NothingToWithdraw)));
+}
+
+// ── Issue #380: `remaining` must be panic-free and accurate ──────────────────
+
+#[test]
+fn withdraw_remaining_reflects_real_balance_after_transfer() {
+    // `remaining` in the `withdrawn` event must equal the contract's real
+    // balance AFTER the transfer — not a stale pre-transfer value combined
+    // incorrectly, and never panicking.
+    let s = Setup::new(100, 3600, false);
+    s.advance_secs(100); // 10_000 accrued
+    let contract_before = s.token.balance(&s.client.address); // 360_000
+    s.client.withdraw(&5_000);
+    let contract_after = s.token.balance(&s.client.address); // 355_000
+    assert_eq!(contract_before - 5_000, contract_after);
+
+    let all_events = s.env.events().all();
+    let stream_events: std::vec::Vec<_> = all_events
+        .iter()
+        .filter(|(contract, _, _)| contract == &s.client.address)
+        .collect();
+    // The last stream event is the `withdrawn` event:
+    // (amount, total_withdrawn, remaining)
+    let data: (i128, i128, i128) = stream_events[stream_events.len() - 1]
+        .2
+        .try_into_val(&s.env)
+        .unwrap();
+    let (amount, total_withdrawn, remaining) = data;
+    assert_eq!(amount, 5_000);
+    assert_eq!(total_withdrawn, 5_000);
+    assert_eq!(remaining, contract_after);
+}
+
+#[test]
+fn withdraw_remaining_is_zero_when_draining_full_balance() {
+    // Withdrawing the entire funded balance must not panic and must leave
+    // `remaining == 0` (matching the real post-transfer balance).
+    let s = Setup::new(100, 3600, false);
+    s.advance_secs(3600); // end reached; streamed == full deposit (360_000)
+    s.client.withdraw(&360_000);
+    let contract_after = s.token.balance(&s.client.address);
+    assert_eq!(contract_after, 0);
+
+    let all_events = s.env.events().all();
+    let stream_events: std::vec::Vec<_> = all_events
+        .iter()
+        .filter(|(contract, _, _)| contract == &s.client.address)
+        .collect();
+    let data: (i128, i128, i128) = stream_events[stream_events.len() - 1]
+        .2
+        .try_into_val(&s.env)
+        .unwrap();
+    let (_amount, _total, remaining) = data;
+    assert_eq!(remaining, 0);
+    assert_eq!(remaining, contract_after);
+}
+
+// ── Issue #381: top_up must reject an ended bounded stream ───────────────────
+//
+// `_extend_duration` / `_top_up_and_extend` intentionally do NOT get this guard
+// — extending `end_time` forward re-opens an ended stream (and
+// `top_up_and_extend` pairs the deposit with that extension), which is their
+// legitimate purpose.
+
+#[test]
+fn top_up_rejected_on_ended_bounded_stream() {
+    let env = Env::default();
+    // 100s stream ending at BASE_TIME+100.
+    let (client, tok, sender, _recipient) =
+        direct_stream(&env, 100, 10_000, BASE_TIME, BASE_TIME + 100);
+    let token_admin = token::StellarAssetClient::new(&env, &tok.address);
+    token_admin.mint(&sender, &10_000);
+    advance(&env, 100); // now == end_time → ended
+    assert_eq!(
+        client.try_top_up(&sender, &10_000),
+        Err(Ok(Error::StreamEnded))
+    );
+}
+
+#[test]
+fn top_up_allowed_on_open_ended_stream_after_time() {
+    // Regression: an open-ended stream (end == 0) never "ends", so top_up stays
+    // available regardless of how far time advances.
+    let env = Env::default();
+    let (client, tok, sender, _recipient) = direct_stream(&env, 100, 100, BASE_TIME, 0);
+    let token_admin = token::StellarAssetClient::new(&env, &tok.address);
+    token_admin.mint(&sender, &50_000);
+    advance(&env, 5_000);
+    client.top_up(&sender, &50_000);
+    assert_eq!(tok.balance(&client.address), 100 + 50_000);
+}
+
+#[test]
+fn top_up_allowed_on_active_bounded_stream() {
+    // Regression: top_up on a bounded stream that has NOT yet ended is unaffected.
+    let env = Env::default();
+    let (client, tok, sender, _recipient) =
+        direct_stream(&env, 100, 10_000, BASE_TIME, BASE_TIME + 3_600);
+    let token_admin = token::StellarAssetClient::new(&env, &tok.address);
+    token_admin.mint(&sender, &50_000);
+    advance(&env, 100); // well before end (BASE_TIME+3600)
+    client.top_up(&sender, &50_000);
+    assert_eq!(tok.balance(&client.address), 10_000 + 50_000);
+}
+
+#[test]
+fn extend_duration_allowed_on_ended_stream_reopens_it() {
+    // Extending is the purpose of `extend_duration`; re-opening an ended
+    // bounded stream must NOT be blocked by the top_up-only guard.
+    let env = Env::default();
+    let (client, tok, sender, _recipient) =
+        direct_stream(&env, 100, 10_000, BASE_TIME, BASE_TIME + 100);
+    let token_admin = token::StellarAssetClient::new(&env, &tok.address);
+    token_admin.mint(&sender, &10_000); // fund the 100s extension (100 * 100)
+    advance(&env, 100); // now == end_time → ended
+    client.extend_duration(&sender, &100);
+    assert_eq!(client.info().end_time, BASE_TIME + 100 + 100);
+    assert_eq!(tok.balance(&client.address), 10_000 + 10_000);
+}
+
+#[test]
+fn top_up_and_extend_allowed_on_ended_stream_reopens_it() {
+    // `top_up_and_extend` pairs a deposit with an extension, so — like
+    // `extend_duration` — re-opening an ended stream is its legitimate use.
+    let env = Env::default();
+    let (client, tok, sender, _recipient) =
+        direct_stream(&env, 100, 10_000, BASE_TIME, BASE_TIME + 100);
+    let token_admin = token::StellarAssetClient::new(&env, &tok.address);
+    token_admin.mint(&sender, &20_000);
+    advance(&env, 100); // now == end_time → ended
+    client.top_up_and_extend(&sender, &10_000, &200);
+    assert_eq!(client.info().end_time, BASE_TIME + 100 + 200);
+    assert_eq!(tok.balance(&client.address), 10_000 + 10_000);
+}
