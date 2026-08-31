@@ -32,7 +32,8 @@ fn bump_instance(env: &Env) {
 /// oracle configuration, and emergency pause authority:
 ///
 /// - `Admin`       — configure oracle, grant/revoke roles, emergency pause.
-/// - `PriceFeeder` — submit prices (or Admin, acting as super-user).
+/// - `PriceFeeder` — submit prices. `submit_price` requires this role
+///                   specifically; being `Admin` alone is not sufficient.
 /// - `Pauser`      — call `pause`/`unpause` without needing full `Admin`.
 ///                   Mirrors `DripGovernor::Role::Pauser`, closing the
 ///                   delegation gap noted in issue #203.
@@ -328,7 +329,11 @@ impl TwapOracle {
         Ok(())
     }
 
-    /// Submit a price observation. Gated on `PriceFeeder` (or `Admin`).
+    /// Submit a price observation. Gated strictly on `PriceFeeder` — `Admin`
+    /// is not sufficient, so a single admin key cannot inject a price point
+    /// into the feeder set and shift the aggregated median. The admin can
+    /// grant itself `PriceFeeder`, but that is an explicit, auditable on-chain
+    /// action rather than an implicit super-user bypass.
     ///
     /// `price` is a fixed-point integer scaled by `10^decimals`, where
     /// `decimals` comes from the oracle's stored `OracleConfig` (set via
@@ -357,7 +362,7 @@ impl TwapOracle {
         if is_paused(&env) {
             return Err(Error::ContractPaused);
         }
-        require_role_or_admin(&env, &caller, Role::PriceFeeder)?;
+        require_role(&env, &caller, Role::PriceFeeder)?;
 
         if price == 0 {
             return Err(Error::InvalidPrice);
@@ -656,6 +661,21 @@ fn revoke_role_inner(env: &Env, role: Role, account: &Address) -> Result<bool, E
     Ok(true)
 }
 
+/// Requires that `caller` authorized the transaction and holds `role`
+/// specifically. Unlike [`require_role_or_admin`], being `Admin` is **not**
+/// sufficient — the role grant itself is checked. `submit_price` uses this
+/// so the admin key alone cannot inject a price point into the feeder set
+/// and pull the aggregated median (see
+/// [`TwapOracle::submit_price`](crate::TwapOracle::submit_price)).
+fn require_role(env: &Env, caller: &Address, role: Role) -> Result<(), Error> {
+    caller.require_auth();
+    if has_role(env, role, caller) {
+        Ok(())
+    } else {
+        Err(Error::NotAuthorized)
+    }
+}
+
 /// Requires that `caller` authorized the transaction and holds `role` **or**
 /// is an `Admin`. Admin acts as a super-user.
 fn require_role_or_admin(env: &Env, caller: &Address, role: Role) -> Result<(), Error> {
@@ -901,6 +921,13 @@ mod tests {
         (env, client, admin)
     }
 
+    /// Grants `admin` the `PriceFeeder` role. `submit_price` requires the
+    /// role specifically (Admin alone is rejected), so tests that submit
+    /// prices as the admin must grant the role first.
+    fn grant_admin_feeder(client: &TwapOracleClient<'static>, admin: &Address) {
+        client.grant_role(admin, &Role::PriceFeeder, admin);
+    }
+
     #[test]
     fn initialize_sets_admin_and_grants_role() {
         let (_env, client, admin) = setup();
@@ -981,10 +1008,15 @@ mod tests {
     }
 
     #[test]
-    fn admin_can_submit_price() {
+    fn admin_without_price_feeder_role_cannot_submit_price() {
         let (_env, client, admin) = setup();
         client.initialize(&admin);
 
+        // Admin alone is not a price feeder — must hold PriceFeeder explicitly.
+        let result = client.try_submit_price(&admin, &100);
+        assert_eq!(result, Err(Ok(Error::NotAuthorized)));
+
+        client.grant_role(&admin, &Role::PriceFeeder, &admin);
         let result = client.try_submit_price(&admin, &100);
         assert!(result.is_ok());
     }
@@ -1005,6 +1037,7 @@ mod tests {
     fn submit_price_rejects_zero() {
         let (_env, client, admin) = setup();
         client.initialize(&admin);
+        grant_admin_feeder(&client, &admin);
 
         let result = client.try_submit_price(&admin, &0);
         assert_eq!(result, Err(Ok(Error::InvalidPrice)));
@@ -1037,6 +1070,7 @@ mod tests {
     fn get_twap_price_rejects_stale_price() {
         let (env, client, admin) = setup();
         client.initialize(&admin);
+        grant_admin_feeder(&client, &admin);
 
         let config = OracleConfig {
             decimals: 8,
@@ -1066,6 +1100,7 @@ mod tests {
     fn get_twap_price_returns_fresh_price() {
         let (_env, client, admin) = setup();
         client.initialize(&admin);
+        grant_admin_feeder(&client, &admin);
 
         let config = OracleConfig {
             decimals: 8,
@@ -1084,6 +1119,7 @@ mod tests {
     fn calculate_fiat_stream_payout_works() {
         let (_env, client, admin) = setup();
         client.initialize(&admin);
+        grant_admin_feeder(&client, &admin);
 
         let config = OracleConfig {
             decimals: 8,
@@ -1102,6 +1138,7 @@ mod tests {
     fn calculate_fiat_stream_payout_overflow() {
         let (_env, client, admin) = setup();
         client.initialize(&admin);
+        grant_admin_feeder(&client, &admin);
 
         let config = OracleConfig {
             decimals: 0,
@@ -1120,6 +1157,7 @@ mod tests {
     fn calculate_fiat_stream_payout_deadlocks_when_outer_lock_held() {
         let (env, client, admin) = setup();
         client.initialize(&admin);
+        grant_admin_feeder(&client, &admin);
 
         let config = OracleConfig {
             decimals: 8,
@@ -1206,6 +1244,7 @@ mod tests {
     fn pause_blocks_submit_price() {
         let (_env, client, admin) = setup();
         client.initialize(&admin);
+        grant_admin_feeder(&client, &admin);
 
         let config = OracleConfig {
             decimals: 8,
@@ -1224,6 +1263,7 @@ mod tests {
     fn submit_price_works_after_unpause() {
         let (_env, client, admin) = setup();
         client.initialize(&admin);
+        grant_admin_feeder(&client, &admin);
 
         client.pause(&admin);
         client.unpause(&admin);
@@ -1255,6 +1295,7 @@ mod tests {
     fn get_twap_price_works_while_paused() {
         let (_env, client, admin) = setup();
         client.initialize(&admin);
+        grant_admin_feeder(&client, &admin);
 
         let config = OracleConfig {
             decimals: 8,
@@ -1483,6 +1524,7 @@ mod tests {
     fn get_twap_price_aggregates_median_across_feeders() {
         let (env, client, admin) = setup();
         client.initialize(&admin);
+        grant_admin_feeder(&client, &admin);
 
         let config = OracleConfig {
             decimals: 8,
@@ -1508,6 +1550,7 @@ mod tests {
     fn get_twap_price_averages_middle_two_on_even_count() {
         let (env, client, admin) = setup();
         client.initialize(&admin);
+        grant_admin_feeder(&client, &admin);
 
         let config = OracleConfig {
             decimals: 8,
@@ -1530,6 +1573,7 @@ mod tests {
     fn get_twap_price_ignores_stale_submitters_in_aggregate() {
         let (env, client, admin) = setup();
         client.initialize(&admin);
+        grant_admin_feeder(&client, &admin);
 
         let config = OracleConfig {
             decimals: 8,
@@ -1565,6 +1609,7 @@ mod tests {
     fn get_twap_price_errors_stale_when_all_submitters_stale() {
         let (env, client, admin) = setup();
         client.initialize(&admin);
+        grant_admin_feeder(&client, &admin);
 
         let config = OracleConfig {
             decimals: 8,
@@ -1597,6 +1642,7 @@ mod tests {
     fn price_age_reports_seconds_since_last_submission() {
         let (env, client, admin) = setup();
         client.initialize(&admin);
+        grant_admin_feeder(&client, &admin);
 
         let config = OracleConfig {
             decimals: 8,
@@ -1650,6 +1696,7 @@ mod tests {
     fn is_price_stale_reflects_max_staleness_without_erroring() {
         let (env, client, admin) = setup();
         client.initialize(&admin);
+        grant_admin_feeder(&client, &admin);
 
         let config = OracleConfig {
             decimals: 8,
@@ -1707,6 +1754,7 @@ mod tests {
     fn submit_price_extends_instance_ttl() {
         let (env, client, admin) = setup();
         client.initialize(&admin);
+        grant_admin_feeder(&client, &admin);
         client.submit_price(&admin, &50_000_000);
 
         let ttl = env.as_contract(&client.address, || env.storage().instance().get_ttl());
@@ -1719,6 +1767,7 @@ mod tests {
     fn configure_oracle_clears_price_when_decimals_change() {
         let (_env, client, admin) = setup();
         client.initialize(&admin);
+        grant_admin_feeder(&client, &admin);
 
         let config = OracleConfig {
             decimals: 8,
@@ -1746,6 +1795,7 @@ mod tests {
     fn configure_oracle_clears_price_when_asset_peg_changes() {
         let (_env, client, admin) = setup();
         client.initialize(&admin);
+        grant_admin_feeder(&client, &admin);
 
         let config = OracleConfig {
             decimals: 8,
@@ -1773,6 +1823,7 @@ mod tests {
     fn configure_oracle_preserves_price_when_only_staleness_changes() {
         let (_env, client, admin) = setup();
         client.initialize(&admin);
+        grant_admin_feeder(&client, &admin);
 
         let config = OracleConfig {
             decimals: 8,
