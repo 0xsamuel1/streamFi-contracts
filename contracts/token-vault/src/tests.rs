@@ -35,7 +35,8 @@ impl Setup {
 
         let tok_admin = token::StellarAssetClient::new(&env, &token_addr);
 
-        // Mint a large supply to the user so deposits succeed
+        // Mint a large supply to the owner and user so authorized deposits succeed
+        tok_admin.mint(&owner, &(max_limit));
         tok_admin.mint(&user, &(max_limit));
 
         let vault_id = env.register_contract(None, super::TokenVault);
@@ -65,9 +66,9 @@ fn deposit_respects_max_limit() {
     let max_limit: i128 = 1_000_000;
     let s = Setup::new(max_limit);
 
-    s.client.deposit(&s.user, &max_limit);
+    s.client.deposit(&s.owner, &max_limit);
 
-    let result = s.client.try_deposit(&s.user, &1);
+    let result = s.client.try_deposit(&s.owner, &1);
     assert_eq!(result, Err(Ok(Error::LimitExceeded)));
 }
 
@@ -75,8 +76,8 @@ fn deposit_respects_max_limit() {
 fn deposit_rejects_amount_that_would_overflow_i128() {
     let s = Setup::new(i128::MAX);
 
-    s.client.deposit(&s.user, &(i128::MAX - 10));
-    let result = s.client.try_deposit(&s.user, &20);
+    s.client.deposit(&s.owner, &(i128::MAX - 10));
+    let result = s.client.try_deposit(&s.owner, &20);
     assert_eq!(result, Err(Ok(Error::ArithmeticOverflow)));
 }
 
@@ -85,11 +86,35 @@ fn deposit_succeeds_with_real_sender_auth() {
     let max_limit: i128 = 1_000_000;
     let s = Setup::new(max_limit);
 
-    s.client.deposit(&s.user, &999_900);
+    s.client.deposit(&s.owner, &999_900);
     assert_eq!(
-        s.client.try_deposit(&s.user, &200),
+        s.client.try_deposit(&s.owner, &200),
         Err(Ok(Error::LimitExceeded))
     );
+}
+
+#[test]
+fn operator_can_deposit() {
+    let s = Setup::new(1_000_000);
+    let op = Address::generate(&s.env);
+    let asset = token::StellarAssetClient::new(&s.env, &s.token.address);
+    asset.mint(&op, &500);
+    s.client.set_operator(&s.owner, &op);
+
+    s.client.deposit(&op, &500);
+    let balance = s
+        .env
+        .as_contract(&s.client.address, || storage::get_balance(&s.env));
+    assert_eq!(balance, Some(500));
+}
+
+#[test]
+fn stranger_cannot_deposit() {
+    let s = Setup::new(1_000_000);
+    let stranger = Address::generate(&s.env);
+
+    let result = s.client.try_deposit(&stranger, &100);
+    assert_eq!(result, Err(Ok(Error::NotAuthorized)));
 }
 
 #[test]
@@ -101,7 +126,7 @@ fn set_limit_succeeds_for_owner_with_real_auth() {
 #[test]
 fn withdraw_succeeds_with_real_owner_auth() {
     let s = Setup::new(1_000_000);
-    s.client.deposit(&s.user, &1_000);
+    s.client.deposit(&s.owner, &1_000);
 
     let recipient = Address::generate(&s.env);
     s.client.withdraw(&s.owner, &recipient, &400);
@@ -224,7 +249,7 @@ fn non_owner_cannot_revoke_operator() {
 #[test]
 fn operator_can_withdraw() {
     let s = Setup::new(1_000_000);
-    s.client.deposit(&s.user, &500);
+    s.client.deposit(&s.owner, &500);
 
     let op = Address::generate(&s.env);
     s.client.set_operator(&s.owner, &op);
@@ -247,7 +272,7 @@ fn operator_can_set_limit() {
 #[test]
 fn stranger_cannot_withdraw_even_with_operator_set() {
     let s = Setup::new(1_000_000);
-    s.client.deposit(&s.user, &500);
+    s.client.deposit(&s.owner, &500);
 
     let op = Address::generate(&s.env);
     s.client.set_operator(&s.owner, &op);
@@ -260,7 +285,7 @@ fn stranger_cannot_withdraw_even_with_operator_set() {
 #[test]
 fn after_revoke_operator_can_no_longer_withdraw() {
     let s = Setup::new(1_000_000);
-    s.client.deposit(&s.user, &500);
+    s.client.deposit(&s.owner, &500);
 
     let op = Address::generate(&s.env);
     s.client.set_operator(&s.owner, &op);
@@ -325,7 +350,7 @@ fn pause_blocks_deposit() {
 #[test]
 fn pause_blocks_withdraw() {
     let s = Setup::new(1_000_000);
-    s.client.deposit(&s.user, &500);
+    s.client.deposit(&s.owner, &500);
     s.client.pause(&s.owner);
 
     let recipient = Address::generate(&s.env);
@@ -348,7 +373,7 @@ fn operations_resume_after_unpause() {
     s.client.unpause(&s.owner);
 
     // All three should work again after unpause
-    s.client.deposit(&s.user, &100);
+    s.client.deposit(&s.owner, &100);
     s.client.set_limit(&s.owner, &2_000_000);
     let recipient = Address::generate(&s.env);
     s.client.withdraw(&s.owner, &recipient, &50);
@@ -358,7 +383,7 @@ fn operations_resume_after_unpause() {
 #[test]
 fn operator_also_blocked_by_pause() {
     let s = Setup::new(1_000_000);
-    s.client.deposit(&s.user, &500);
+    s.client.deposit(&s.owner, &500);
 
     let op = Address::generate(&s.env);
     s.client.set_operator(&s.owner, &op);
@@ -412,7 +437,7 @@ fn initialize_emits_initialized_event() {
 #[test]
 fn deposit_emits_deposited_event() {
     let s = Setup::new(1_000_000);
-    s.client.deposit(&s.user, &500);
+    s.client.deposit(&s.owner, &500);
 
     let events = vault_events(&s);
     assert_eq!(events.len(), 2);
@@ -420,7 +445,7 @@ fn deposit_emits_deposited_event() {
     let (_, topics, data) = &events[1];
     assert_eq!(
         topics.clone(),
-        (symbol_short!("deposited"), s.user.clone()).into_val(&s.env)
+        (symbol_short!("deposited"), s.owner.clone()).into_val(&s.env)
     );
     let payload: (i128, i128) = data.clone().try_into_val(&s.env).unwrap();
     assert_eq!(payload, (500_i128, 500_i128));
@@ -429,7 +454,7 @@ fn deposit_emits_deposited_event() {
 #[test]
 fn withdraw_emits_withdrawn_event() {
     let s = Setup::new(1_000_000);
-    s.client.deposit(&s.user, &1_000);
+    s.client.deposit(&s.owner, &1_000);
 
     let recipient = Address::generate(&s.env);
     s.client.withdraw(&s.owner, &recipient, &400);
@@ -527,8 +552,8 @@ fn failed_operations_emit_no_events() {
     let base = vault_events(&s).len();
 
     // Deposit over the limit reverts without publishing a `deposited` event.
-    s.client.deposit(&s.user, &999_900);
-    let result = s.client.try_deposit(&s.user, &200);
+    s.client.deposit(&s.owner, &999_900);
+    let result = s.client.try_deposit(&s.owner, &200);
     assert_eq!(result, Err(Ok(Error::LimitExceeded)));
     assert_eq!(vault_events(&s).len(), base + 1);
 
@@ -649,7 +674,7 @@ fn initialize_extends_instance_ttl() {
 #[test]
 fn deposit_extends_instance_ttl() {
     let s = Setup::new(1_000_000);
-    s.client.deposit(&s.user, &100);
+    s.client.deposit(&s.owner, &100);
     let ttl = s
         .env
         .as_contract(&s.client.address, || s.env.storage().instance().get_ttl());
@@ -659,7 +684,7 @@ fn deposit_extends_instance_ttl() {
 #[test]
 fn withdraw_extends_instance_ttl() {
     let s = Setup::new(1_000_000);
-    s.client.deposit(&s.user, &100);
+    s.client.deposit(&s.owner, &100);
     let recipient = Address::generate(&s.env);
     s.client.withdraw(&s.owner, &recipient, &50);
     let ttl = s
