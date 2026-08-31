@@ -1,4 +1,4 @@
-use soroban_sdk::{contracttype, Address};
+use soroban_sdk::{contracttype, Address, Vec};
 
 /// Identifies which on-chain stream operation to estimate fees for.
 ///
@@ -82,6 +82,24 @@ pub struct FactoryStatus {
     pub protocol_fee_bps: Option<u32>,
 }
 
+/// A page of stream IDs returned by `streams_by_sender` / `streams_by_recipient`,
+/// paired with the total count so a caller can tell truncation from an
+/// exhausted history without a separate `stream_count_by_*` round-trip.
+///
+/// `ids.len()` is capped at [`crate::query::MAX_PAGE_SIZE`] (100) regardless of
+/// the requested `limit`. Compare `offset + ids.len()` against `total`: if it
+/// is less, more pages remain (whether because `limit` was clamped or the
+/// caller simply asked for a partial window).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StreamPage {
+    pub ids: Vec<u64>,
+    /// Total number of streams for this sender/recipient, independent of
+    /// `offset`/`limit`. Equivalent to `stream_count_by_sender` /
+    /// `stream_count_by_recipient`.
+    pub total: u32,
+}
+
 /// Storage keys for the DripFactory contract.
 ///
 /// The `#[contracttype]` macro serializes each variant as an XDR tagged union:
@@ -119,7 +137,7 @@ pub enum DataKey {
     /// Value: `Vec<u64>` — list of stream IDs created by this sender, in creation order
     /// Serialization: XDR tagged union [discriminant: u32][sender: XDR Address] → [stream_ids: XDR Vec<u64>]
     /// TTL: Extended to `ttl::EXTEND_TO` (200_000 ledgers) on each new stream
-    /// Note: Grows unbounded as the sender creates more streams
+    /// Note: Legacy pre-paged index; kept for backward-compatible reads and migration
     BySender(Address),
 
     /// **Persistent storage.** Index of all streams received by a given recipient.
@@ -127,7 +145,7 @@ pub enum DataKey {
     /// Value: `Vec<u64>` — list of stream IDs where this address is the recipient, in creation order
     /// Serialization: XDR tagged union [discriminant: u32][recipient: XDR Address] → [stream_ids: XDR Vec<u64>]
     /// TTL: Extended to `ttl::EXTEND_TO` (200_000 ledgers) on each new stream
-    /// Note: Grows unbounded as the recipient receives more streams
+    /// Note: Legacy pre-paged index; kept for backward-compatible reads and migration
     ByRecipient(Address),
 
     /// **Instance storage.** WASM hash of the DripStream contract (for deployment).
@@ -168,4 +186,24 @@ pub enum DataKey {
     /// what should be a single atomic creation. A missing entry is treated
     /// as `false`/unlocked.
     CreateLock,
+
+    /// **Persistent storage.** Paged sender index for bounded reads.
+    /// Key: `DataKey::BySenderPage(Address, u32)` — sender plus zero-based page number
+    /// Value: `Vec<u64>` — up to `query::MAX_PAGE_SIZE` stream IDs in creation order
+    BySenderPage(Address, u32),
+
+    /// **Persistent storage.** Paged recipient index for bounded reads.
+    /// Key: `DataKey::ByRecipientPage(Address, u32)` — recipient plus zero-based page number
+    /// Value: `Vec<u64>` — up to `query::MAX_PAGE_SIZE` stream IDs in creation order
+    ByRecipientPage(Address, u32),
+
+    /// **Persistent storage.** Total number of sender-indexed streams.
+    /// Key: `DataKey::BySenderCount(Address)` — sender address
+    /// Value: `u32` — total count used to derive page boundaries
+    BySenderCount(Address),
+
+    /// **Persistent storage.** Total number of recipient-indexed streams.
+    /// Key: `DataKey::ByRecipientCount(Address)` — recipient address
+    /// Value: `u32` — total count used to derive page boundaries
+    ByRecipientCount(Address),
 }

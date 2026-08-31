@@ -6,15 +6,27 @@ mod storage;
 #[cfg(test)]
 mod tests;
 
+use drip_common::{is_zero_address, TTL_EXTEND_TO, TTL_THRESHOLD};
 use errors::Error;
 use soroban_sdk::{contract, contractimpl, token, Address, Env};
 use storage::{
-    get_balance, get_max_limit, get_operator, get_owner, get_token, is_paused, remove_operator,
-    set_balance, set_max_limit, set_operator, set_owner, set_paused, set_token,
+    get_balance, get_max_limit, get_operator, get_owner, get_pending_owner,
+    get_pending_owner_proposer, get_token, is_paused, remove_operator, remove_pending_owner,
+    remove_pending_owner_proposer, set_balance, set_max_limit, set_operator, set_owner, set_paused,
+    set_pending_owner, set_pending_owner_proposer, set_token,
 };
 
 #[contract]
 pub struct TokenVault;
+
+/// Extends the instance storage TTL to ensure vault state remains active and
+/// does not archive during idle periods. Matches the TTL management pattern
+/// across sibling contracts (DripFactory, DripGovernor, TwapOracle).
+fn bump_instance(env: &Env) {
+    env.storage()
+        .instance()
+        .extend_ttl(TTL_THRESHOLD, TTL_EXTEND_TO);
+}
 
 /// Checks that `caller` is either the vault owner or the currently delegated
 /// operator, then consumes the caller's auth. Returns `NotAuthorized` if
@@ -73,6 +85,7 @@ impl TokenVault {
             return Err(Error::AlreadyInitialized);
         }
 
+        bump_instance(&env);
         set_owner(&env, &owner);
         set_token(&env, &token);
         set_max_limit(&env, &max_limit);
@@ -84,13 +97,13 @@ impl TokenVault {
 
     pub fn deposit(env: Env, from: Address, amount: i128) -> Result<(), Error> {
         assert_not_paused(&env)?;
-        from.require_auth();
+        let owner = get_owner(&env).ok_or(Error::NotInitialized)?;
+        require_owner_or_operator(&env, &from, &owner)?;
 
         if amount <= 0 {
             return Err(Error::InvalidAmount);
         }
 
-        let _owner = get_owner(&env).ok_or(Error::NotInitialized)?;
         // Check current balance and max_limit safely
         let balance = get_balance(&env).unwrap_or(0_i128);
         let max = get_max_limit(&env).ok_or(Error::NotInitialized)?;
@@ -106,6 +119,7 @@ impl TokenVault {
         let tk = token::Client::new(&env, &get_token(&env).ok_or(Error::NotInitialized)?);
         tk.transfer(&from, &env.current_contract_address(), &amount);
 
+        bump_instance(&env);
         set_balance(&env, &new_balance);
         events::deposited(&env, &from, amount, new_balance);
         Ok(())
@@ -128,6 +142,7 @@ impl TokenVault {
         let tk = token::Client::new(&env, &get_token(&env).ok_or(Error::NotInitialized)?);
         tk.transfer(&env.current_contract_address(), &to, &amount);
 
+        bump_instance(&env);
         set_balance(&env, &new_balance);
         events::withdrawn(&env, &caller, &to, amount, new_balance);
         Ok(())
@@ -146,6 +161,7 @@ impl TokenVault {
             return Err(Error::LimitExceeded);
         }
         let old_limit = get_max_limit(&env).ok_or(Error::ArithmeticOverflow)?;
+        bump_instance(&env);
         set_max_limit(&env, &new_limit);
         events::limit_set(&env, &caller, old_limit, new_limit);
         Ok(())
@@ -165,6 +181,7 @@ impl TokenVault {
             return Err(Error::NotAuthorized);
         }
         caller.require_auth();
+        bump_instance(&env);
         set_operator(&env, &operator);
         events::operator_set(&env, &caller, &operator);
         Ok(())
@@ -179,14 +196,76 @@ impl TokenVault {
             return Err(Error::NotAuthorized);
         }
         caller.require_auth();
+        bump_instance(&env);
         remove_operator(&env);
         events::operator_revoked(&env, &caller);
+        Ok(())
+    }
+
+    // ── Owner transfer (owner-gated, 2-step) ──────────────────────────────
+
+    /// Propose a new owner (step 1 of 2).
+    ///
+    /// Only the current owner may call this. The transfer is not complete
+    /// until the proposed address calls `accept_owner`. This two-step pattern
+    /// (matching `DripGovernor::propose_authority`) allows a lost or
+    /// compromised owner key to be rotated out without risking a mistake: the
+    /// new address must prove it is live and can actually sign before the old
+    /// owner is relinquished.
+    ///
+    /// # Errors
+    ///
+    /// - `NotAuthorized` — `caller` is not the current owner.
+    /// - `InvalidParam` — `new_owner` is the zero address.
+    pub fn propose_owner(env: Env, caller: Address, new_owner: Address) -> Result<(), Error> {
+        let owner = get_owner(&env).ok_or(Error::NotInitialized)?;
+        if caller != owner {
+            return Err(Error::NotAuthorized);
+        }
+        caller.require_auth();
+        if is_zero_address(&env, &new_owner) {
+            return Err(Error::InvalidParam);
+        }
+        bump_instance(&env);
+        set_pending_owner(&env, &new_owner);
+        set_pending_owner_proposer(&env, &caller);
+        events::owner_proposed(&env, &caller, &new_owner);
+        Ok(())
+    }
+
+    /// Accept the pending owner transfer (step 2 of 2).
+    ///
+    /// Must be called by the pending owner address itself. Completes the
+    /// transfer: the pending owner becomes the vault owner and the previous
+    /// owner (the proposer) is removed.
+    ///
+    /// # Errors
+    ///
+    /// - `NoPendingOwner` — no owner transfer has been proposed.
+    /// - `NotPendingOwner` — `caller` is not the proposed pending owner.
+    pub fn accept_owner(env: Env, caller: Address) -> Result<(), Error> {
+        let pending = get_pending_owner(&env).ok_or(Error::NoPendingOwner)?;
+        if caller != pending {
+            return Err(Error::NotPendingOwner);
+        }
+        caller.require_auth();
+        let proposer = get_pending_owner_proposer(&env).ok_or(Error::NoPendingOwner)?;
+        bump_instance(&env);
+        set_owner(&env, &caller);
+        remove_pending_owner(&env);
+        remove_pending_owner_proposer(&env);
+        events::owner_accepted(&env, &caller, &proposer);
         Ok(())
     }
 
     /// Read-only: the current operator address, if any.
     pub fn operator(env: Env) -> Option<Address> {
         get_operator(&env)
+    }
+
+    /// Read-only: the current owner address, if any.
+    pub fn owner(env: Env) -> Option<Address> {
+        get_owner(&env)
     }
 
     // ── Emergency pause (owner-gated) ─────────────────────────────────────
@@ -206,6 +285,7 @@ impl TokenVault {
         if is_paused(&env) {
             return Err(Error::AlreadyPaused);
         }
+        bump_instance(&env);
         set_paused(&env, true);
         events::paused(&env, &caller, env.ledger().timestamp());
         Ok(())
@@ -221,6 +301,7 @@ impl TokenVault {
         if !is_paused(&env) {
             return Err(Error::NotPaused);
         }
+        bump_instance(&env);
         set_paused(&env, false);
         events::unpaused(&env, &caller, env.ledger().timestamp());
         Ok(())

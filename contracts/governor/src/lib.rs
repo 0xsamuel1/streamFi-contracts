@@ -1,4 +1,5 @@
 #![no_std]
+#![allow(deprecated)]
 
 //! DripGovernor is the protocol's immutable parameter store.
 //!
@@ -24,7 +25,7 @@ mod ttl;
 
 use soroban_sdk::{contract, contractimpl, panic_with_error, Address, BytesN, Env, Symbol, Vec};
 
-use drip_common::is_zero_stellar_account;
+use drip_common::is_zero_address;
 
 pub use config::GovernorConfig;
 pub use errors::Error;
@@ -89,6 +90,7 @@ impl DripGovernor {
         role::grant(&env, Role::Admin, &authority);
         role::grant(&env, Role::FeeManager, &authority);
         role::grant(&env, Role::RateManager, &authority);
+        role::grant(&env, Role::Pauser, &authority);
         events::initialized(&env, &authority, &fee_recipient, &factory_address);
     }
 
@@ -300,7 +302,7 @@ impl DripGovernor {
         caller: Address,
         new_authority: Address,
     ) -> Result<(), Error> {
-        if is_zero_stellar_account(&env, &new_authority)
+        if is_zero_address(&env, &new_authority)
             || role::has_role(&env, Role::Admin, &new_authority)
         {
             return Err(Error::InvalidParam);
@@ -323,7 +325,7 @@ impl DripGovernor {
         caller: Address,
         new_authority: Address,
     ) -> Result<(), Error> {
-        if is_zero_stellar_account(&env, &new_authority)
+        if is_zero_address(&env, &new_authority)
             || role::has_role(&env, Role::Admin, &new_authority)
         {
             return Err(Error::InvalidParam);
@@ -356,16 +358,15 @@ impl DripGovernor {
         caller.require_auth();
         ttl::bump(&env);
 
-        // Revoke Admin from the original proposer.
+        // Grant Admin to the new authority (the caller) first, then revoke from proposer.
+        // This ensures the LastAdmin guard never blocks the transfer.
         let proposer: Address = env
             .storage()
             .instance()
             .get(&DataKey::PendingAuthorityProposer)
             .ok_or(Error::NoPendingAuthority)?;
-        let _ = role::revoke(&env, Role::Admin, &proposer)?;
-
-        // Grant Admin to the new authority (the caller).
         role::grant(&env, Role::Admin, &caller);
+        let _ = role::revoke(&env, Role::Admin, &proposer)?;
 
         // Clean up pending state.
         env.storage().instance().remove(&DataKey::PendingAuthority);
@@ -422,7 +423,7 @@ impl DripGovernor {
     }
 
     pub fn set_fee_recipient(env: Env, caller: Address, recipient: Address) -> Result<(), Error> {
-        if is_zero_stellar_account(&env, &recipient) {
+        if is_zero_address(&env, &recipient) {
             return Err(Error::InvalidParam);
         }
         assert_not_paused(&env)?;

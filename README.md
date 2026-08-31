@@ -121,8 +121,8 @@ fn create_stream(
 ) -> Result<u64, Error>    // returns stream_id
 
 fn stream_address(env: Env, stream_id: u64) -> Option<Address>
-fn streams_by_sender(env: Env, sender: Address, offset: u32, limit: u32) -> Vec<u64>
-fn streams_by_recipient(env: Env, recipient: Address, offset: u32, limit: u32) -> Vec<u64>
+fn streams_by_sender(env: Env, sender: Address, offset: u32, limit: u32) -> StreamPage   // { ids: Vec<u64>, total: u32 } — limit is capped at 100; compare offset + ids.len() against total to detect truncation
+fn streams_by_recipient(env: Env, recipient: Address, offset: u32, limit: u32) -> StreamPage
 fn stream_count(env: Env) -> u64
 fn protocol_fee_bps(env: Env) -> u32   // basis points, e.g. 30 = 0.3%; reads live from DripGovernor
 
@@ -360,6 +360,14 @@ conduit-contracts/
     ├── security.md             # threat model
     └── adr/                    # Architecture Decision Records
 ```
+
+---
+
+## Off-chain Indexer
+
+`indexer/` holds a scaffold for polling contract events into Postgres (raw event log plus
+derived tables). It's not wired to a live RPC endpoint yet — see `indexer/README.md` for
+setup and known gaps (single-instance only, non-idempotent derived-table folds).
 
 ---
 

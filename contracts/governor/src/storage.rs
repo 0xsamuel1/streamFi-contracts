@@ -1,6 +1,26 @@
 use soroban_sdk::{contracttype, Address};
 
-use crate::role::Role;
+/// Protocol administration roles.
+///
+/// Each role gates a distinct slice of governor state, so independent wallets
+/// can own fee policy and rate/duration bounds without sharing a single
+/// all-powerful key:
+///
+/// - `Admin`       — grant and revoke roles (including `Admin` itself).
+/// - `FeeManager`  — `set_fee_bps`, `set_fee_recipient`.
+/// - `RateManager` — `set_max_rate`, `set_min_duration`.
+/// - `Pauser`      — `governor_pause`, `governor_unpause`, `pause_factory`, `unpause_factory`.
+///
+/// A role may be held by any number of accounts, and one account may hold any
+/// combination of roles.
+#[contracttype]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Role {
+    Admin,
+    FeeManager,
+    RateManager,
+    Pauser,
+}
 
 /// Composite key identifying a single (role, account) grant.
 ///
