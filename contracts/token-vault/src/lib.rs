@@ -95,13 +95,13 @@ impl TokenVault {
 
     pub fn deposit(env: Env, from: Address, amount: i128) -> Result<(), Error> {
         assert_not_paused(&env)?;
-        from.require_auth();
+        let owner = get_owner(&env).ok_or(Error::NotInitialized)?;
+        require_owner_or_operator(&env, &from, &owner)?;
 
         if amount <= 0 {
             return Err(Error::InvalidAmount);
         }
 
-        let _owner = get_owner(&env).ok_or(Error::NotInitialized)?;
         // Check current balance and max_limit safely
         let balance = get_balance(&env).unwrap_or(0_i128);
         let max = get_max_limit(&env).ok_or(Error::NotInitialized)?;
