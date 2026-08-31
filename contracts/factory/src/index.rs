@@ -1,6 +1,10 @@
 use soroban_sdk::{Address, Env, Vec};
 
-use crate::{query, storage::DataKey, ttl};
+use crate::{
+    query,
+    storage::{DataKey, StreamPage},
+    ttl,
+};
 
 const PAGE_SIZE: u32 = query::MAX_PAGE_SIZE;
 
@@ -154,6 +158,10 @@ fn read_index(
             return Vec::new(env);
         }
 
+        // `limit` is silently capped at PAGE_SIZE (== query::MAX_PAGE_SIZE) so a
+        // caller can never force an unbounded read. Callers can't tell a capped
+        // page from a sender's whole (smaller) history by length alone, so
+        // `streams_by_sender`/`streams_by_recipient` pair this with `total`.
         let effective_limit = limit.min(PAGE_SIZE);
         let end = offset.saturating_add(effective_limit).min(count);
         let mut result = Vec::new(env);
@@ -238,30 +246,34 @@ pub fn append_recipient_index(env: &Env, recipient: &Address, stream_id: u64) {
     );
 }
 
-pub fn streams_by_sender(env: &Env, sender: Address, offset: u32, limit: u32) -> Vec<u64> {
+pub fn streams_by_sender(env: &Env, sender: Address, offset: u32, limit: u32) -> StreamPage {
     let count_key = DataKey::BySenderCount(sender.clone());
     let legacy_key = DataKey::BySender(sender.clone());
-    read_index(
+    let ids = read_index(
         env,
         &count_key,
         &legacy_key,
         |page| DataKey::BySenderPage(sender.clone(), page),
         offset,
         limit,
-    )
+    );
+    let total = count_index(env, &count_key, &legacy_key);
+    StreamPage { ids, total }
 }
 
-pub fn streams_by_recipient(env: &Env, recipient: Address, offset: u32, limit: u32) -> Vec<u64> {
+pub fn streams_by_recipient(env: &Env, recipient: Address, offset: u32, limit: u32) -> StreamPage {
     let count_key = DataKey::ByRecipientCount(recipient.clone());
     let legacy_key = DataKey::ByRecipient(recipient.clone());
-    read_index(
+    let ids = read_index(
         env,
         &count_key,
         &legacy_key,
         |page| DataKey::ByRecipientPage(recipient.clone(), page),
         offset,
         limit,
-    )
+    );
+    let total = count_index(env, &count_key, &legacy_key);
+    StreamPage { ids, total }
 }
 
 pub fn stream_count_by_sender(env: &Env, sender: Address) -> u32 {
