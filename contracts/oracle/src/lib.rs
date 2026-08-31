@@ -1,5 +1,6 @@
 #![no_std]
 
+use drip_common::rbac;
 use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, Env, Vec};
 
 /// TTL extension constants matching the convention used across sibling
@@ -570,101 +571,79 @@ impl TwapOracle {
     }
 }
 
-// ── Internal helpers ───────────────────────────────────────────────────────
+// ── Internal RBAC helpers (delegate to drip_common::rbac) ─────────────────
+//
+// These thin wrappers translate the oracle's DataKey / Role types into the
+// generic key values expected by drip_common::rbac, keeping every RBAC logic
+// change in one place (the shared crate) rather than duplicated here.
 
-fn has_role(env: &Env, role: Role, account: &Address) -> bool {
-    let key = DataKey::Role(RoleKey {
+fn role_key(role: Role, account: &Address) -> DataKey {
+    DataKey::Role(RoleKey {
         role,
         account: account.clone(),
-    });
-    env.storage().instance().has(&key)
+    })
 }
 
-/// Returns every account currently holding `role` from the persistent index.
+fn has_role(env: &Env, role: Role, account: &Address) -> bool {
+    rbac::has_role(env, &role_key(role, account))
+}
+
+/// Returns every account currently holding `role` from the instance-storage index.
 fn role_members(env: &Env, role: Role) -> Vec<Address> {
-    env.storage()
-        .instance()
-        .get(&DataKey::RoleMembers(role))
-        .unwrap_or(Vec::new(env))
+    rbac::role_members(env, &DataKey::RoleMembers(role))
 }
 
 fn grant_role_inner(env: &Env, role: Role, account: &Address) -> bool {
-    if has_role(env, role, account) {
-        return false;
-    }
-    let key = DataKey::Role(RoleKey {
-        role,
-        account: account.clone(),
-    });
-    env.storage().instance().set(&key, &true);
-    if role == Role::Admin {
-        let next: u32 = env
-            .storage()
-            .instance()
-            .get(&DataKey::AdminCount)
-            .unwrap_or(0)
-            + 1;
-        env.storage().instance().set(&DataKey::AdminCount, &next);
-    }
-    // Maintain the role-members index.
-    let mut members: Vec<Address> = role_members(env, role);
-    members.push_back(account.clone());
-    env.storage()
-        .instance()
-        .set(&DataKey::RoleMembers(role), &members);
-    true
+    rbac::grant(
+        env,
+        &role_key(role, account),
+        &DataKey::AdminCount,
+        &DataKey::RoleMembers(role),
+        role == Role::Admin,
+        account,
+    )
 }
 
+/// Revokes `role` from `account`.
+///
+/// When the role is `PriceFeeder`, also purges the feeder's submission data
+/// via `remove_submitter` — an oracle-specific side-effect kept here rather
+/// than in the shared crate.
 fn revoke_role_inner(env: &Env, role: Role, account: &Address) -> Result<bool, Error> {
-    if !has_role(env, role, account) {
-        return Ok(false);
-    }
-    if role == Role::Admin {
-        let count: u32 = env
-            .storage()
-            .instance()
-            .get(&DataKey::AdminCount)
-            .unwrap_or(0);
-        if count <= 1 {
-            return Err(Error::LastAdmin);
-        }
-        env.storage()
-            .instance()
-            .set(&DataKey::AdminCount, &(count - 1));
-    }
-    let key = DataKey::Role(RoleKey {
-        role,
-        account: account.clone(),
-    });
-    env.storage().instance().remove(&key);
-    // Remove from the role-members index.
-    let members: Vec<Address> = role_members(env, role);
-    let mut updated: Vec<Address> = Vec::new(env);
-    for m in members.iter() {
-        if m != *account {
-            updated.push_back(m);
-        }
-    }
-    env.storage()
-        .instance()
-        .set(&DataKey::RoleMembers(role), &updated);
+    let removed = rbac::revoke(
+        env,
+        &role_key(role, account),
+        &DataKey::AdminCount,
+        &DataKey::RoleMembers(role),
+        role == Role::Admin,
+        account,
+    )
+    .map_err(|e| match e {
+        rbac::RbacError::LastAdmin => Error::LastAdmin,
+        rbac::RbacError::NotAuthorized => Error::NotAuthorized,
+    })?;
 
-    if role == Role::PriceFeeder {
+    // Oracle-specific: clean up submission data when a PriceFeeder is revoked.
+    if removed && role == Role::PriceFeeder {
         remove_submitter(env, account);
     }
 
-    Ok(true)
+    Ok(removed)
 }
 
 /// Requires that `caller` authorized the transaction and holds `role` **or**
 /// is an `Admin`. Admin acts as a super-user.
+///
+/// Does NOT bump TTL here — callers call `bump_instance` at their entry point.
 fn require_role_or_admin(env: &Env, caller: &Address, role: Role) -> Result<(), Error> {
-    caller.require_auth();
-    if has_role(env, Role::Admin, caller) || has_role(env, role, caller) {
-        Ok(())
-    } else {
-        Err(Error::NotAuthorized)
-    }
+    rbac::require_role_or_admin(
+        env,
+        caller,
+        &role_key(role, caller),
+        &role_key(Role::Admin, caller),
+        None, // oracle bumps TTL at the entry-point level, not inside the RBAC check
+    )
+    .map_err(|_| Error::NotAuthorized)
 }
 
 /// Records `account` in the `Submitters` set the first time it submits a
