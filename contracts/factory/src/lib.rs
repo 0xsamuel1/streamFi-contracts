@@ -17,11 +17,11 @@ use soroban_sdk::{
     contract, contractimpl, panic_with_error, token as tok, Address, BytesN, Env, IntoVal, Vec,
 };
 
-use drip_common::is_zero_stellar_account;
+use drip_common::is_zero_address;
 
 pub use errors::Error;
 use storage::DataKey;
-pub use storage::{BatchStreamRequest, FactoryStatus, FeeEstimate, StreamOperation};
+pub use storage::{BatchStreamRequest, FactoryStatus, FeeEstimate, StreamOperation, StreamPage};
 
 /// Maximum number of streams accepted by a single `create_batch_streams`
 /// (and `cancel_batch_streams`/`stream_addresses`) call. Each
@@ -98,12 +98,12 @@ impl DripFactory {
         }
 
         // ── Recipient validation ─────────────────────────────────────────
-        if is_zero_stellar_account(&env, &recipient) || recipient == sender {
+        if is_zero_address(&env, &recipient) || recipient == sender {
             return Err(Error::InvalidRecipient);
         }
 
         // ── Token validation ─────────────────────────────────────────────
-        if is_zero_stellar_account(&env, &token) {
+        if is_zero_address(&env, &token) {
             return Err(Error::InvalidToken);
         }
 
@@ -384,23 +384,38 @@ impl DripFactory {
         Ok(out)
     }
 
-    /// Paginated list of stream IDs created by `sender`.
+    /// Paginated list of stream IDs created by `sender`, paired with the
+    /// sender's total stream count.
     ///
     /// Returns at most `limit` IDs starting at `offset`, capped at
-    /// [`query::MAX_PAGE_SIZE`] (100) inside [`query::paginate`]. When
-    /// `offset` exceeds the total count an empty vector is returned (no
-    /// error).
-    pub fn streams_by_sender(env: Env, sender: Address, offset: u32, limit: u32) -> Vec<u64> {
+    /// [`query::MAX_PAGE_SIZE`] (100) regardless of how large `limit` is —
+    /// this cap is silent, so compare `offset + result.ids.len()` against
+    /// `result.total` to tell "capped" apart from "sender has no more
+    /// streams" instead of guessing from `ids.len()` alone or issuing a
+    /// separate `stream_count_by_sender` call. When `offset` exceeds the
+    /// total count, `ids` is empty (no error) and `total` still reports the
+    /// real count.
+    pub fn streams_by_sender(env: Env, sender: Address, offset: u32, limit: u32) -> StreamPage {
         index::streams_by_sender(&env, sender, offset, limit)
     }
 
-    /// Paginated list of stream IDs where `recipient` is the beneficiary.
+    /// Paginated list of stream IDs where `recipient` is the beneficiary,
+    /// paired with the recipient's total stream count.
     ///
     /// Returns at most `limit` IDs starting at `offset`, capped at
-    /// [`query::MAX_PAGE_SIZE`] (100) inside [`query::paginate`]. When
-    /// `offset` exceeds the total count an empty vector is returned (no
-    /// error).
-    pub fn streams_by_recipient(env: Env, recipient: Address, offset: u32, limit: u32) -> Vec<u64> {
+    /// [`query::MAX_PAGE_SIZE`] (100) regardless of how large `limit` is —
+    /// this cap is silent, so compare `offset + result.ids.len()` against
+    /// `result.total` to tell "capped" apart from "recipient has no more
+    /// streams" instead of guessing from `ids.len()` alone or issuing a
+    /// separate `stream_count_by_recipient` call. When `offset` exceeds the
+    /// total count, `ids` is empty (no error) and `total` still reports the
+    /// real count.
+    pub fn streams_by_recipient(
+        env: Env,
+        recipient: Address,
+        offset: u32,
+        limit: u32,
+    ) -> StreamPage {
         index::streams_by_recipient(&env, recipient, offset, limit)
     }
 

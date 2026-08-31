@@ -6,7 +6,7 @@ mod storage;
 #[cfg(test)]
 mod tests;
 
-use drip_common::{TTL_EXTEND_TO, TTL_THRESHOLD};
+use drip_common::{is_zero_address, TTL_EXTEND_TO, TTL_THRESHOLD};
 use errors::Error;
 use soroban_sdk::{contract, contractimpl, token, Address, Env};
 use storage::{
@@ -105,7 +105,8 @@ impl TokenVault {
 
     pub fn deposit(env: Env, from: Address, amount: i128) -> Result<(), Error> {
         assert_not_paused(&env)?;
-        from.require_auth();
+        let owner = get_owner(&env).ok_or(Error::NotInitialized)?;
+        require_owner_or_operator(&env, &from, &owner)?;
 
         if amount <= 0 {
             return Err(Error::InvalidAmount);
@@ -210,9 +211,70 @@ impl TokenVault {
         Ok(())
     }
 
+    // ── Owner transfer (owner-gated, 2-step) ──────────────────────────────
+
+    /// Propose a new owner (step 1 of 2).
+    ///
+    /// Only the current owner may call this. The transfer is not complete
+    /// until the proposed address calls `accept_owner`. This two-step pattern
+    /// (matching `DripGovernor::propose_authority`) allows a lost or
+    /// compromised owner key to be rotated out without risking a mistake: the
+    /// new address must prove it is live and can actually sign before the old
+    /// owner is relinquished.
+    ///
+    /// # Errors
+    ///
+    /// - `NotAuthorized` — `caller` is not the current owner.
+    /// - `InvalidParam` — `new_owner` is the zero address.
+    pub fn propose_owner(env: Env, caller: Address, new_owner: Address) -> Result<(), Error> {
+        let owner = get_owner(&env).ok_or(Error::NotInitialized)?;
+        if caller != owner {
+            return Err(Error::NotAuthorized);
+        }
+        caller.require_auth();
+        if is_zero_address(&env, &new_owner) {
+            return Err(Error::InvalidParam);
+        }
+        bump_instance(&env);
+        set_pending_owner(&env, &new_owner);
+        set_pending_owner_proposer(&env, &caller);
+        events::owner_proposed(&env, &caller, &new_owner);
+        Ok(())
+    }
+
+    /// Accept the pending owner transfer (step 2 of 2).
+    ///
+    /// Must be called by the pending owner address itself. Completes the
+    /// transfer: the pending owner becomes the vault owner and the previous
+    /// owner (the proposer) is removed.
+    ///
+    /// # Errors
+    ///
+    /// - `NoPendingOwner` — no owner transfer has been proposed.
+    /// - `NotPendingOwner` — `caller` is not the proposed pending owner.
+    pub fn accept_owner(env: Env, caller: Address) -> Result<(), Error> {
+        let pending = get_pending_owner(&env).ok_or(Error::NoPendingOwner)?;
+        if caller != pending {
+            return Err(Error::NotPendingOwner);
+        }
+        caller.require_auth();
+        let proposer = get_pending_owner_proposer(&env).ok_or(Error::NoPendingOwner)?;
+        bump_instance(&env);
+        set_owner(&env, &caller);
+        remove_pending_owner(&env);
+        remove_pending_owner_proposer(&env);
+        events::owner_accepted(&env, &caller, &proposer);
+        Ok(())
+    }
+
     /// Read-only: the current operator address, if any.
     pub fn operator(env: Env) -> Option<Address> {
         get_operator(&env)
+    }
+
+    /// Read-only: the current owner address, if any.
+    pub fn owner(env: Env) -> Option<Address> {
+        get_owner(&env)
     }
 
     // ── Emergency pause (owner-gated) ─────────────────────────────────────

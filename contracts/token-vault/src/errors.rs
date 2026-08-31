@@ -18,4 +18,10 @@ pub enum Error {
     NotInitialized = 8,
     /// `initialize` was called on a vault that is already initialized.
     AlreadyInitialized = 9,
+    /// A provided argument was invalid (e.g. proposing a zero-address owner).
+    InvalidParam = 10,
+    /// `accept_owner` was called but there is no pending owner to accept.
+    NoPendingOwner = 11,
+    /// `accept_owner` was called by an address that is not the pending owner.
+    NotPendingOwner = 12,
 }

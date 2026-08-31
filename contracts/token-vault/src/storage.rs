@@ -17,6 +17,12 @@ pub enum DataKey {
     /// Emergency-pause flag. When `true`, all state-mutating entry points
     /// (`deposit`, `withdraw`, `set_limit`) revert before touching state.
     Paused,
+    /// Pending owner address for the 2-step owner transfer.
+    /// Set by `propose_owner`, consumed by `accept_owner`.
+    PendingOwner,
+    /// The current owner who proposed the transfer.
+    /// Used to hand ownership over when the pending owner accepts.
+    PendingOwnerProposer,
 }
 
 pub fn set_owner(env: &Env, a: &Address) {
@@ -74,4 +80,32 @@ pub fn is_paused(env: &Env) -> bool {
         .instance()
         .get(&DataKey::Paused)
         .unwrap_or(false)
+}
+
+pub fn set_pending_owner(env: &Env, owner: &Address) {
+    env.storage().instance().set(&DataKey::PendingOwner, owner);
+}
+
+pub fn get_pending_owner(env: &Env) -> Option<Address> {
+    env.storage().instance().get(&DataKey::PendingOwner)
+}
+
+pub fn remove_pending_owner(env: &Env) {
+    env.storage().instance().remove(&DataKey::PendingOwner);
+}
+
+pub fn set_pending_owner_proposer(env: &Env, proposer: &Address) {
+    env.storage()
+        .instance()
+        .set(&DataKey::PendingOwnerProposer, proposer);
+}
+
+pub fn get_pending_owner_proposer(env: &Env) -> Option<Address> {
+    env.storage().instance().get(&DataKey::PendingOwnerProposer)
+}
+
+pub fn remove_pending_owner_proposer(env: &Env) {
+    env.storage()
+        .instance()
+        .remove(&DataKey::PendingOwnerProposer);
 }
